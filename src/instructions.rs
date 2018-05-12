@@ -3,28 +3,6 @@ use parser::{Statement,Argument,ArgumentKind};
 use std::io::{self, Write};
 
 
-macro_rules! instr {
-    ($arg:expr, $w:ident, [$($argtype:pat => $ex:expr);*]) => {{
-        match $arg {
-            $($argtype => {
-                $w.write_all(&[$ex]);
-                $innerarg.write_to($w);
-            }),*,
-            _ => Err(CompileError::AddressMode)
-        }
-    }};
-    ({$c:expr}) => {{$c}}
-}
-
-macro_rules! instr_array {
-    ($writable:expr, $instr:expr, $arg:expr, $($p:pat => $t:tt),*) => {
-        match $instr {
-            $($p => Ok(instr!($arg, $writable, $t))),*,
-            _ => Err(CompileError::Instruction)
-        }
-    }
-}
-
 #[derive(Debug)]
 pub enum CompileError {
     Instruction,
@@ -33,9 +11,7 @@ pub enum CompileError {
 }
 
 pub fn write_instr<W: Write>(mut w: W, instr: &str, arg: Argument) -> Result<(), CompileError> {
-    /*instr_array! { w, &*instr, arg,
-        "LDA" => [ ]
-    }*/
+    use self::ArgumentKind::*;
     macro_rules! write {
         ($opcode:expr) => {{
             w.write_all(&[$opcode]).map_err(CompileError::WriteError)?;
@@ -88,9 +64,7 @@ pub fn write_instr<W: Write>(mut w: W, instr: &str, arg: Argument) -> Result<(),
         // shorthand
         ($offset:expr) => { common_implied!($offset + 0xA, $offset) }
     }
-    // TODO: generate this
-    use self::ArgumentKind::*;
-    // In somewhat numerical order
+    // TODO: generate this from some db
     match instr {
         // ARITHMETIC
         "ADC" => common_arith!(0x60),
@@ -213,7 +187,6 @@ pub fn write_instr<W: Write>(mut w: W, instr: &str, arg: Argument) -> Result<(),
             Stack =>        0x83,
             DirectPage =>   0x85,
             DPIndLong =>    0x87,
-            //Immediate =>  0x89,
             Absolute =>     0x8D,
             Long =>         0x8F,
             DPIndY =>       0x91,

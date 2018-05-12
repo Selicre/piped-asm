@@ -28,13 +28,18 @@ fn run() -> Result<(),Box<Error>> {
     let parsed = Parser::new(lexed);
     let mut output = File::create("out.bin")?;
     for l in parsed {
+        let mut err = false;
         println!("{}", l.as_ref().map(|c| c.to_string()).unwrap_or_else(|c| format!("{:?}", c)));
         if let Ok(Statement::Instruction { name, size, arg }) = l {
-            // no such pass yet
-            if let ArgumentKind::Label(_) | ArgumentKind::AnonLabel(_) = arg.kind { continue; }
-            if let Err(e) = instructions::write_instr(&mut output, name.as_ident().unwrap(), arg) {
-                return Err(format!("{:?}",e).into())
+            if err {
+                // no such pass yet
+                if let ArgumentKind::Label(_) | ArgumentKind::AnonLabel(_) = arg.kind { continue; }
+                if let Err(e) = instructions::write_instr(&mut output, name.as_ident().unwrap(), arg) {
+                    return Err(format!("{:?}",e).into())
+                }
             }
+        } else {
+
         }
     }
     Ok(())

@@ -8,6 +8,9 @@ use lexer::{Span,SpanKind};
 
 use byteorder::{WriteBytesExt,LittleEndian};
 
+
+
+
 #[derive(Debug)]
 pub enum ArgumentKind {
     Implied,
@@ -78,7 +81,7 @@ impl Argument {
                 &[SpanKind::Long(c), Symbol(','), Ident(x)] if &*x == "x" => LongX(*c),
                 &[Symbol('#'), Byte(c1), Symbol(','), Symbol('#'), Byte(c2)] => BlockMove(*c1, *c2),
                 &[Byte(c1), Symbol(','), Byte(c2)] => BlockMove(*c1, *c2),
-                _ => return Err(ParseError::GenericSyntaxError)
+                _ => return Err(ParseError::UnknownAddressingMode(spans[0].clone()))
             }
         };
         Ok(Argument { kind, spans })
@@ -142,7 +145,7 @@ impl OpSize {
                 "l" => OpSize::Long,
                 "w" => OpSize::Word,
                 "b" => OpSize::Byte,
-                _ => return Err(ParseError::InvalidOpSize)
+                _ => return Err(ParseError::InvalidOpSize(s.clone()))
             }, s.clone()))
         } else { panic!("compiler broke: op size not an ident") }
     }
@@ -158,6 +161,9 @@ pub enum Statement {
         size: Option<(OpSize,Span)>,
         arg: Argument   // TODO: parse this later?
     },
+    RawData {
+        data: Vec<u8>,
+    },
     Attributes {
         attrs: Vec<Span>
     }
@@ -170,6 +176,11 @@ impl fmt::Display for Statement {
             Label { name } => write!(f, "Label {}", name),
             Instruction { name, size, arg } => write!(f, "Instruction: {}, argument: {:?}", name, arg.kind),
             Attributes { attrs } => write!(f, "Attributes (unused yet)"),
+            RawData { data } => {
+                write!(f, "Raw data: ")?;
+                for i in data { write!(f, "{:02X} ", i)? }
+                Ok(())
+            },
             _ => write!(f, "Unimplemented!")
         }
     }
@@ -179,8 +190,10 @@ impl fmt::Display for Statement {
 #[derive(Debug)]
 pub enum ParseError {
     UnknownSpan,
-    InvalidOpSize,
-    GenericSyntaxError
+    InvalidOpSize(Span),
+    GenericSyntaxError,
+    UnknownAddressingMode(Span),
+    UnexpectedSymbol(Span)
 }
 
 // Easier to match on this, also todo: deref
@@ -251,6 +264,24 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                 &[Ident(_), Symbol(':')] |
                 &[AnonLabel(_)] =>
                     Some(Label { name: buf.spans[0].clone() }),
+                &[Ident(c), ref rest.., LineBreak] if &*c == "db" => Some(RawData {
+                    data: {
+                        let mut dbuf = Vec::new();
+                        let mut allow_comma = false;
+                        // Allow any kind unless annotated as strict? TODO: local or global config based on attrs
+                        for (c,s) in rest.iter().zip(buf.spans.iter().skip(1)) {
+                            match c {
+                                Whitespace => {},
+                                Symbol(',') if allow_comma => allow_comma = false,
+                                Byte(c) => { allow_comma = true; dbuf.write_u8(*c); },
+                                Word(c) => { allow_comma = true; dbuf.write_u16::<LittleEndian>(*c); },
+                                Long(c) => { allow_comma = true; dbuf.write_u24::<LittleEndian>(*c); },
+                                c => return Some(Err(ParseError::UnexpectedSymbol(s.clone())))
+                            }
+                        }
+                        dbuf
+                    }
+                }),
                 &[Ident(_), LineBreak] |
                 &[Ident(_), Whitespace, Symbol(':')] => Some(Instruction {
                     name: buf.spans[0].clone(),
@@ -275,7 +306,10 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                 &[Ident(_), Symbol('.'), Ident(_), Whitespace, ref rest.., LineBreak] |
                 &[Ident(_), Symbol('.'), Ident(_), Whitespace, ref rest.., Whitespace, Symbol(':')] => Some(Instruction {
                     name: buf.spans[0].clone(),
-                    size: Some(OpSize::parse(&buf.spans[2]).unwrap()),   // todo: fix panic
+                    size: Some(match OpSize::parse(&buf.spans[2]) {
+                        Ok(c) => c,
+                        Err(e) => return Some(Err(e))
+                    }),   // todo: fix panic
                     arg: match Argument::parse(buf.spans.iter()
                                          .skip(4).take(rest.len())
                                          .filter(|c| !c.is_whitespace())
