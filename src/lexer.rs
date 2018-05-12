@@ -175,6 +175,11 @@ impl Span {
             None
         }
     }
+    pub fn take(&mut self) -> Self {
+        let mut out = Span::Empty;
+        ::std::mem::swap(self, &mut out);
+        out
+    }
     pub fn ident(data: String, length: u32, start: Location) -> Self {
         Span::Ident(SpanData { data, start, length })
     }

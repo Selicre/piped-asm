@@ -160,12 +160,12 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
         let mut buf = QueueClearHandle(&mut self.buf);
         while let Some(c) = self.iter.next() {
             buf.push(c);
-            match match &**buf {
+            match match &mut **buf {
                 // Label:
-                &[ref name @ Ident(_), Symbol(':',_)] |
-                &[ref name @ AnonLabel(_)] =>
-                    Some(Label { name: name.clone() }),
-                &[Ident(ref c), ref rest.., LineBreak] if c.data == "db" => Some(RawData {
+                [ref mut name @ Ident(_), Symbol(':',_)] |
+                [ref mut name @ AnonLabel(_)] =>
+                    Some(Label { name: name.take() }),
+                [Ident(ref c), ref rest.., LineBreak] if c.data == "db" => Some(RawData {
                     data: {
                         let mut dbuf = Vec::new();
                         let mut allow_comma = false;
@@ -183,25 +183,25 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                         dbuf
                     }
                 }),
-                &[ref name @ Ident(_), LineBreak] |
-                &[ref name @ Ident(_), Whitespace, Symbol(':',_)] => Some(Instruction {
-                    name: name.clone(),
+                [ref mut name @ Ident(_), LineBreak] |
+                [ref mut name @ Ident(_), Whitespace, Symbol(':',_)] => Some(Instruction {
+                    name: name.take(),
                     size: None,
                     arg: Argument::parse(&[]).unwrap()
                 }),
-                &[ref name @ Ident(_), Whitespace, ref rest.., LineBreak] |
-                &[ref name @ Ident(_), Whitespace, ref rest.., Whitespace, Symbol(':',_)] => Some(Instruction {
-                    name: name.clone(),
+                [ref mut name @ Ident(_), Whitespace, ref rest.., LineBreak] |
+                [ref mut name @ Ident(_), Whitespace, ref rest.., Whitespace, Symbol(':',_)] => Some(Instruction {
+                    name: name.take(),
                     size: None,
                     arg: match Argument::parse(rest) {
                         Ok(c) => c,
                         Err(e) => return Some(Err(e))
                     }
                 }),
-                &[ref name @ Ident(_), Symbol('.',_), Ident(_), Whitespace, ref rest.., LineBreak] |
-                &[ref name @ Ident(_), Symbol('.',_), Ident(_), Whitespace, ref rest.., Whitespace, Symbol(':',_)] => Some(Instruction {
-                    name: name.clone(),
-                    size: Some(match OpSize::parse(&buf[2]) {
+                [ref mut name @ Ident(_), Symbol('.',_), ref size @ Ident(_), Whitespace, ref rest.., LineBreak] |
+                [ref mut name @ Ident(_), Symbol('.',_), ref size @ Ident(_), Whitespace, ref rest.., Whitespace, Symbol(':',_)] => Some(Instruction {
+                    name: name.take(),
+                    size: Some(match OpSize::parse(size) {
                         Ok(c) => c,
                         Err(e) => return Some(Err(e))
                     }),   // todo: fix panic
@@ -210,11 +210,11 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                         Err(e) => return Some(Err(e))
                     }
                 }),
-                &[Symbol('#',_), Symbol('[',_), ref rest.., Symbol(']',_)] => Some(Attributes {
+                [Symbol('#',_), Symbol('[',_), ref rest.., Symbol(']',_)] => Some(Attributes {
                     attrs: rest.to_vec()
                 }),
-                &[Whitespace] | &[LineBreak] => None,
-                &[.., LineBreak] => return Some(Err(ParseError::GenericSyntaxError)),
+                [Whitespace] | [LineBreak] => None,
+                [.., LineBreak] => return Some(Err(ParseError::GenericSyntaxError)),
                 _ => continue
             } {
                 Some(c) => return Some(Ok(c)),
