@@ -1,5 +1,6 @@
 use byteorder::ByteOrder;
-use parser::{Statement,Argument,ArgumentKind};
+use parser::Statement;
+use addrmodes::AddressingMode;
 use std::io::{self, Write};
 
 
@@ -10,8 +11,8 @@ pub enum CompileError {
     WriteError(io::Error)
 }
 
-pub fn write_instr<W: Write>(mut w: W, instr: &str, arg: Argument) -> Result<(), CompileError> {
-    use self::ArgumentKind::*;
+pub fn write_instr<W: Write>(mut w: W, instr: &str, arg: AddressingMode) -> Result<(), CompileError> {
+    use self::AddressingMode::*;
     macro_rules! write {
         ($opcode:expr) => {{
             w.write_all(&[$opcode]).map_err(CompileError::WriteError)?;
@@ -19,13 +20,13 @@ pub fn write_instr<W: Write>(mut w: W, instr: &str, arg: Argument) -> Result<(),
         }}
     }
     macro_rules! kinds {
-        (Implied => $im:expr) => { match arg.kind { Implied => write!($im), _ => return Err(CompileError::AddressMode) } };
+        (Implied => $im:expr) => { match arg { Implied => write!($im), _ => return Err(CompileError::AddressMode) } };
 
-        (Implied => $im:expr, $($p:ident => $e:expr),*) => { match arg.kind { Implied => write!($im), $($p(_) => write!($e)),*, _ => return Err(CompileError::AddressMode) } };
-        ($($p:ident => $e:expr),*) => { match arg.kind { $($p(_) => write!($e)),*, _ => return Err(CompileError::AddressMode) } };
+        (Implied => $im:expr, $($p:ident => $e:expr),*) => { match arg { Implied => write!($im), $($p(_) => write!($e)),*, _ => return Err(CompileError::AddressMode) } };
+        ($($p:ident => $e:expr),*) => { match arg { $($p(_) => write!($e)),*, _ => return Err(CompileError::AddressMode) } };
     }
     macro_rules! move_mem {
-        ($e:expr) => { match arg.kind { BlockMove(_,_) => write!($e), _ => return Err(CompileError::AddressMode) } }
+        ($e:expr) => { match arg { BlockMove(_,_) => write!($e), _ => return Err(CompileError::AddressMode) } }
     }
     macro_rules! implied {
         ($e:expr) => { kinds! { Implied => $e } }

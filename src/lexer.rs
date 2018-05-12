@@ -7,6 +7,7 @@ use std::fmt::{self, Display};
 pub struct Location {
     line: u32,
     column: u32,
+    byte: u32,
     file: Rc<String>
 }
 
@@ -41,6 +42,7 @@ impl<I: Iterator<Item=char>> Iterator for LocationTracker<I> {
     fn next(&mut self) -> Option<char> {
         let mut c = self.inner.next();
         mem::swap(&mut c, &mut self.buf);
+        self.loc.byte += 1;
         match c {
             Some('\n') => {
                 self.loc.column = 1;
@@ -63,7 +65,7 @@ pub struct Lexer<I> {
 impl<R: Iterator<Item=char>> Lexer<R> {
     pub fn new(filename: String, mut r: R) -> Self {
         Lexer {
-            inner: LexerInner(LocationTracker { buf: r.next(), inner: r, loc: Location { line: 1, column: 1, file: Rc::new(filename) }}),
+            inner: LexerInner(LocationTracker { buf: r.next(), inner: r, loc: Location { line: 1, column: 1, byte: 0, file: Rc::new(filename) }}),
             finished: false
         }
     }
@@ -88,7 +90,43 @@ impl<R: Iterator<Item=char> + ::std::fmt::Debug> Iterator for Lexer<R> {
 #[derive(Debug)]
 pub struct LexerInner<I>(LocationTracker<I>);
 
+// TODO: invert the structure for easier matching
 
+#[derive(Debug,Clone)]
+pub struct SpanData<T> {
+    pub data: T,
+    pub start: Location,
+    pub length: u32
+}
+impl<T: Display> Display for SpanData<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{} at {}", self.data, self.start)
+    }
+}
+
+impl<T: fmt::UpperHex> fmt::UpperHex for SpanData<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.data.fmt(f)?;
+        write!(f, " at {}", self.start)
+    }
+}
+
+#[derive(Debug,Clone)]
+pub enum Span {
+    Ident(SpanData<String>),
+    Symbol(char, SpanData<char>),   // way easier matching
+    Byte(SpanData<u8>),
+    Word(SpanData<u16>),
+    Long(SpanData<u32>),
+    AnonLabel(SpanData<i32>),
+    Successive(Vec<Span>),
+    NumberError(SpanData<()>),
+    Whitespace,
+    LineBreak,
+    Empty        // For the parser to use
+}
+
+/*
 #[derive(Debug,Clone)]
 pub enum SpanKind {
     Ident(String),      // TODO: SmallString?
@@ -97,6 +135,7 @@ pub enum SpanKind {
     Word(u16),
     Long(u32),
     AnonLabel(i32),
+    Successive(Vec<SpanKind>),
     NumberError,        // Pseudotoken for malformed numbers
     Whitespace,         // For statement separation, compound operator parsing, etc.
     LineBreak
@@ -107,67 +146,74 @@ pub struct Span {
     pub kind: SpanKind,
     pub start: Location,
     pub length: u32
-}
+}*/
 
 impl Display for Span {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use self::SpanKind::*;
-        match self.kind {
-            Ident(ref s) => write!(f, "ident \"{}\"", s),
-            Symbol(ref s) => write!(f, "symbol '{}'", s),
+        use self::Span::*;
+        match self {
+            Ident(ref s) => write!(f, "ident {}", s),
+            Symbol(_, ref s) => write!(f, "symbol {}", s),
             Byte(ref s) => write!(f, "byte ${:02X}", s),
             Word(ref s) => write!(f, "word ${:04X}", s),
             Long(ref s) => write!(f, "long ${:06X}", s),
             AnonLabel(ref s) => write!(f, "anonymous label (depth {})", s),
-            NumberError => write!(f, "malformed number"),
+            Successive(ref _s) => write!(f, "several spans"),   // TODO
+            NumberError(_) => write!(f, "malformed number"),
             Whitespace => write!(f, "whitespace"),
-            LineBreak => write!(f, "line break")
-        }?;
-        write!(f, " at {}", self.start)
+            LineBreak => write!(f, "line break"),
+            Empty => write!(f, "empty span"),
+        }
     }
 }
 
 impl Span {
     pub fn as_ident(&self) -> Option<&str> {
-        if let SpanKind::Ident(ref s) = self.kind {
-            Some(&s)
+        if let Span::Ident(ref s) = self {
+            Some(&s.data)
         } else {
             None
         }
     }
-    fn ident(s: String, length: u32, start: Location) -> Self {
-        Self { kind: SpanKind::Ident(s), start, length }
+    pub fn ident(data: String, length: u32, start: Location) -> Self {
+        Span::Ident(SpanData { data, start, length })
     }
-    fn symbol(s: char, start: Location) -> Self {
-        Self { kind: SpanKind::Symbol(s), start, length: 1 }
+    pub fn symbol(data: char, start: Location) -> Self {
+        Span::Symbol(data, SpanData { data, start, length: 1 })
     }
-    fn number(s: u32, length: u32, start: Location) -> Self {
-        let kind = if length > 5 || s > 0xFFFF { SpanKind::Long(s) }
-              else if length > 3 || s > 0x00FF { SpanKind::Word(s as u16) }
-              else { SpanKind::Byte(s as u8) };
-        Self { kind, start, length }
+    pub fn number(data: u32, length: u32, start: Location) -> Self {
+        if length > 5 || data > 0xFFFF {
+            Span::Long(SpanData { data, start, length })
+        } else if length > 3 || data > 0x00FF {
+            Span::Word(SpanData { data: data as u16, start, length })
+        } else {
+            Span::Byte(SpanData { data: data as u8, start, length })
+        }
     }
-    fn hex_number(s: u32, length: u32, start: Location) -> Self {
+    pub fn hex_number(data: u32, length: u32, start: Location) -> Self {
         // Span includes the $ so lengths are + 1
-        let kind = if length > 5 { SpanKind::Long(s) }
-              else if length > 3 { SpanKind::Word(s as u16) }
-              else { SpanKind::Byte(s as u8) };
-        Self { kind, start, length }
+        if length > 5 {
+            Span::Long(SpanData { data, start, length })
+        } else if length > 3 {
+            Span::Word(SpanData { data: data as u16, start, length })
+        } else {
+            Span::Byte(SpanData { data: data as u8, start, length })
+        }
     }
-    fn number_error(length: u32, start: Location) -> Self {
-        Self { kind: SpanKind::NumberError, start, length }
+    pub fn number_error(length: u32, start: Location) -> Self {
+        Span::NumberError(SpanData { data: (), start, length })
     }
-    fn whitespace(start: Location) -> Self {
-        Self { kind: SpanKind::Whitespace, start, length: 0 }
+    pub fn whitespace(start: Location) -> Self {
+        Span::Whitespace
     }
-    fn line_break(start: Location) -> Self {
-        Self { kind: SpanKind::LineBreak, start, length: 0 }
+    pub fn line_break(start: Location) -> Self {
+        Span::LineBreak
     }
-    fn anon_label(amt: i32, length: u32, start: Location) -> Self {
-        Self { kind: SpanKind::AnonLabel(amt), start, length: 0 }
+    pub fn anon_label(data: i32, length: u32, start: Location) -> Self {
+        Span::AnonLabel(SpanData { data, start, length })
     }
     pub fn is_whitespace(&self) -> bool {
-        if let SpanKind::Whitespace | SpanKind::LineBreak = self.kind { true } else { false }
+        if let Span::Whitespace | Span::LineBreak = self { true } else { false }
     }
 }
 

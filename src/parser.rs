@@ -4,134 +4,62 @@ use std::cell::Cell;
 use std::fmt;
 use std::io::{self,Write};
 
-use lexer::{Span,SpanKind};
+use lexer::{Span,SpanData};
 
 use byteorder::{WriteBytesExt,LittleEndian};
-
-
-
 
 #[derive(Debug)]
 pub enum ArgumentKind {
     Implied,
-    Label(String),      // Label
-    AnonLabel(i32),     // ++
-    // The above can be removed if I wanna move labels to be processed at a later time
-    Immediate(u8),      // #$A0
-    ImmediateWord(u16), // #$1234
-    DirectPage(u8),     // $12
-    DPX(u8),            // $12,x
-    DPY(u8),            // $12,y
-    DPInd(u8),          // ($12)
-    DPIndX(u8),         // ($12,x)
-    DPIndY(u8),         // ($12),y
-    DPIndLong(u8),      // [$12]
-    DPIndLongY(u8),     // [$12],y
-    Stack(u8),          // $12,s
-    StackY(u8),         // ($12,s),y
-    Absolute(u16),      // $1234
-    AbsoluteX(u16),     // $1234,x
-    AbsoluteY(u16),     // $1234,y
-    AbsInd(u16),        // ($1234)
-    AbsIndX(u16),       // ($1234,x)
-    AbsIndLong(u16),    // [$1234]
-    Long(u32),          // $7F1234
-    LongX(u32),         // $7F1234,x
-    Relative(i8),       // BRA label
-    RelativeWord(i16),  // BRL label
-    BlockMove(u8,u8)    // #$12,#$34
+    Constant,
+    Direct,
+    IndexedX,
+    IndexedY,
+    Indirect,
+    IndX,
+    IndY,
+    IndLong,
+    IndLongY,
+    Stack,
+    StackY,
+    TwoArgs(Span,Span)  // deal with this separately
 }
 
 #[derive(Debug)]
 pub struct Argument {
     pub kind: ArgumentKind,
-    spans: Vec<Span>
+    pub span: Span
 }
+
+
 
 impl Argument {
-    fn parse(spans: Vec<Span>) -> Result<Self,ParseError> {
-        use self::SpanKind::*;
+    // TODO: make this less stupid, pass the relevant spanqueue part instead
+    fn parse(spans: &[Span]) -> Result<Self, ParseError> {
+        use self::Span::*;
         use self::ArgumentKind::*;
-        let kind = {
-            let kinds = spans.iter().map(|c| &c.kind).collect::<Vec<_>>();
-            match &*kinds {
-                &[] => Implied,
-                &[Ident(ref s)] => Label(s.clone()),
-                &[SpanKind::AnonLabel(c)] => ArgumentKind::AnonLabel(*c),
-                &[Symbol('#'), Byte(c)] => Immediate(*c),
-                &[Symbol('#'), Word(c)] => ImmediateWord(*c),
-                &[Byte(c)] => DirectPage(*c),
-                &[Byte(c), Symbol(','), Ident(x)] if &*x == "x" => DPX(*c),
-                &[Byte(c), Symbol(','), Ident(y)] if &*y == "y" => DPY(*c),
-                &[Symbol('('), Byte(c), Symbol(')')] => DPInd(*c),
-                &[Symbol('('), Byte(c), Symbol(','), Ident(x), Symbol(')')] if &*x == "x" => DPIndX(*c),
-                &[Symbol('('), Byte(c), Symbol(')'), Symbol(','), Ident(y)] if &*y == "y" => DPIndY(*c),
-                &[Symbol('['), Byte(c), Symbol(']')] => DPIndLong(*c),
-                &[Symbol('['), Byte(c), Symbol(']'), Symbol(','), Ident(y)] if &*y == "y" => DPIndLongY(*c),
-                &[Byte(c), Symbol(','), Ident(s)] if &*s == "s" => Stack(*c),
-                &[Symbol('('), Byte(c), Symbol(','), Ident(s), Symbol(')'), Symbol(','), Ident(y)] if &*s == "s" && &*y == "y" => StackY(*c),
-
-                &[Word(c)] => Absolute(*c),
-                &[Word(c), Symbol(','), Ident(x)] if &*x == "x" => AbsoluteX(*c),
-                &[Word(c), Symbol(','), Ident(y)] if &*y == "y" => AbsoluteY(*c),
-                &[Symbol('('), Word(c), Symbol(')')] => AbsInd(*c),
-                &[Symbol('('), Word(c), Symbol(','), Ident(x), Symbol(')')] if &*x == "x" => AbsIndX(*c),
-                &[Symbol('['), Word(c), Symbol(']')] => AbsIndLong(*c),
-                &[SpanKind::Long(c)] => ArgumentKind::Long(*c),
-                &[SpanKind::Long(c), Symbol(','), Ident(x)] if &*x == "x" => LongX(*c),
-                &[Symbol('#'), Byte(c1), Symbol(','), Symbol('#'), Byte(c2)] => BlockMove(*c1, *c2),
-                &[Byte(c1), Symbol(','), Byte(c2)] => BlockMove(*c1, *c2),
-                _ => return Err(ParseError::UnknownAddressingMode(spans[0].clone()))
-            }
+        //spans.iter().for_each(|s| println!("{}", s));
+        // Potentially avoid cloning? Mostly numbers anyway though so
+        let (kind, span) = match spans {
+            &[] => (Implied, Empty),
+            &[ref c] => (Direct, c.clone()),
+            &[Symbol('#',_), ref c] => (Constant, c.clone()),
+            &[ref c, Symbol(',',_), Ident(ref x)] if x.data == "x" => (IndexedX, c.clone()),
+            &[ref c, Symbol(',',_), Ident(ref y)] if y.data == "y" => (IndexedY, c.clone()),
+            &[Symbol('(',_), ref c, Symbol(')',_)] => (Indirect, c.clone()),
+            &[Symbol('(',_), ref c, Symbol(',',_), Ident(ref x), Symbol(')',_)] if x.data == "x" => (IndX, c.clone()),
+            &[Symbol('(',_), ref c, Symbol(')',_), Symbol(',',_), Ident(ref y)] if y.data == "y" => (IndY, c.clone()),
+            &[Symbol('[',_), ref c, Symbol(']',_)] => (IndLong, c.clone()),
+            &[Symbol('[',_), ref c, Symbol(']',_), Symbol(',',_), Ident(ref y)] if y.data == "y" => (IndLongY, c.clone()),
+            &[ref c, Symbol(',',_), Ident(ref s)] if s.data == "s" => (Stack, c.clone()),
+            &[Symbol('(',_), ref c, Symbol(',',_), Ident(ref s), Symbol(')',_), Symbol(',',_), Ident(ref y)] if s.data == "s" && y.data == "y" => (StackY, c.clone()),
+            &[Symbol('#',_), ref c1, Symbol(',',_), Symbol('#',_), ref c2] => (TwoArgs(c1.clone(), c2.clone()), Empty),
+            &[ref c1, Symbol(',',_), ref c2] => (TwoArgs(c1.clone(), c2.clone()), Empty),
+            c => return Err(ParseError::UnknownAddressingMode(c[0].clone()))
         };
-        Ok(Argument { kind, spans })
-    }
-    pub fn write_to<W: Write>(&self, mut w: W) -> io::Result<()> {
-        use self::ArgumentKind::*;
-        match self.kind {
-            Implied => Ok(()),
-            Immediate(c) => w.write_u8(c),      // #$A0
-            ImmediateWord(c) => w.write_u16::<LittleEndian>(c), // #$1234
-            DirectPage(c) => w.write_u8(c),     // $12
-            DPX(c) => w.write_u8(c),            // $12,x
-            DPY(c) => w.write_u8(c),            // $12,y
-            DPInd(c) => w.write_u8(c),          // ($12)
-            DPIndX(c) => w.write_u8(c),         // ($12,x)
-            DPIndY(c) => w.write_u8(c),         // ($12),y
-            DPIndLong(c) => w.write_u8(c),      // [$12]
-            DPIndLongY(c) => w.write_u8(c),     // [$12],y
-            Stack(c) => w.write_u8(c),          // $12,s
-            StackY(c) => w.write_u8(c),         // ($12,s),y
-            Absolute(c) => w.write_u16::<LittleEndian>(c),      // $1234
-            AbsoluteX(c) => w.write_u16::<LittleEndian>(c),     // $1234,x
-            AbsoluteY(c) => w.write_u16::<LittleEndian>(c),     // $1234,y
-            AbsInd(c) => w.write_u16::<LittleEndian>(c),        // ($1234)
-            AbsIndX(c) => w.write_u16::<LittleEndian>(c),       // ($1234,x)
-            AbsIndLong(c) => w.write_u16::<LittleEndian>(c),    // [$1234]
-            Long(c) => w.write_u24::<LittleEndian>(c),          // $7F1234
-            LongX(c) => w.write_u24::<LittleEndian>(c),         // $7F1234,x
-            BlockMove(c1, c2) => { w.write_u8(c1)?; w.write_u8(c2) },   // #$12,#$34
-            Relative(c) => w.write_i8(c),       // ($1234,x)
-            RelativeWord(c) => w.write_i16::<LittleEndian>(c),    // [$1234]
-            _ => panic!("compiler broke: wrong context for write_to")
-        }
+        Ok(Argument { kind, span })
     }
 }
-
-impl fmt::Display for Argument {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use self::ArgumentKind::*;
-        match self.kind {
-            Implied => write!(f, "implied"),
-            Label(ref s) => write!(f, "label {}", s),
-            Immediate(b) => write!(f, "Immediate byte #${:02X}", b),
-            ImmediateWord(w) => write!(f, "Immediate word #${:04X}", w),
-            DirectPage(b) => write!(f, "Direct page ${:02X}", b),
-            _ => write!(f, "something else")
-        }
-    }
-}
-
 #[derive(Debug,Clone)]
 pub enum OpSize {
     Byte,
@@ -140,8 +68,8 @@ pub enum OpSize {
 }
 impl OpSize {
     fn parse(s: &Span) -> Result<(OpSize,Span),ParseError> {
-        if let SpanKind::Ident(ref t) = s.kind {
-            Ok((match &**t {
+        if let Some(t) = s.as_ident() {
+            Ok((match t {
                 "l" => OpSize::Long,
                 "w" => OpSize::Word,
                 "b" => OpSize::Byte,
@@ -174,7 +102,7 @@ impl fmt::Display for Statement {
         use self::Statement::*;
         match self {
             Label { name } => write!(f, "Label {}", name),
-            Instruction { name, size, arg } => write!(f, "Instruction: {}, argument: {:?}", name, arg.kind),
+            Instruction { name, size, arg } => write!(f, "Instruction: {}, argument: {:?}", name, arg),
             Attributes { attrs } => write!(f, "Attributes (unused yet)"),
             RawData { data } => {
                 write!(f, "Raw data: ")?;
@@ -196,54 +124,28 @@ pub enum ParseError {
     UnexpectedSymbol(Span)
 }
 
-// Easier to match on this, also todo: deref
-#[derive(Default)]
-struct SpanQueue {
-    spans: VecDeque<Span>,
-    kind_buf: Cell<Option<Vec<&'static SpanKind>>>  // dubious performance gain but yay unsafety
-}
-
-impl SpanQueue {
-    fn push(&mut self, s: Span) {
-        self.spans.push_back(s);
-    }
-    fn autoclean(&mut self) -> QueueClearHandle {
-        QueueClearHandle(self)
-    }
-    fn clear(&mut self) {
-        self.spans.clear();
-    }
-    fn queue<'a>(&'a self) -> &'a [&'a SpanKind] {
-        let mut b = self.kind_buf.take().unwrap_or_default();
-        b.clear();
-        b.extend(self.spans.iter().map(|c| unsafe { ::std::mem::transmute(&c.kind): &'static SpanKind }));
-        let c = unsafe { ::std::mem::transmute(&*b): &'a [&'a SpanKind] };
-        self.kind_buf.set(Some(b));
-        c
-    }
-}
 // convenience for clearing the struct
-struct QueueClearHandle<'a>(&'a mut SpanQueue);
-impl<'a> Drop for QueueClearHandle<'a> {
+struct QueueClearHandle<'a,T: 'a>(&'a mut Vec<T>);
+impl<'a,T> Drop for QueueClearHandle<'a,T> {
     fn drop(&mut self) {
         self.0.clear();
     }
 }
-impl<'a> ops::Deref for QueueClearHandle<'a> {
-    type Target = SpanQueue;
-    fn deref(&self) -> &SpanQueue {
+impl<'a,T> ops::Deref for QueueClearHandle<'a,T> {
+    type Target = Vec<T>;
+    fn deref(&self) -> &Vec<T> {
         &*self.0
     }
 }
-impl<'a> ops::DerefMut for QueueClearHandle<'a> {
-    fn deref_mut(&mut self) -> &mut SpanQueue {
+impl<'a,T> ops::DerefMut for QueueClearHandle<'a,T> {
+    fn deref_mut(&mut self) -> &mut Vec<T> {
         self.0
     }
 }
 
 pub struct Parser<S> {
     iter: S,
-    buf: SpanQueue
+    buf: Vec<Span>
 }
 impl<S: Iterator<Item=Span>> Parser<S> {
     pub fn new(iter: S) -> Self {
@@ -253,73 +155,63 @@ impl<S: Iterator<Item=Span>> Parser<S> {
 impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
     type Item = Result<Statement,ParseError>;
     fn next(&mut self) -> Option<Result<Statement,ParseError>> {
-        use self::SpanKind::*;
+        use self::Span::*;
         use self::Statement::*;
-        let mut buf = self.buf.autoclean();
+        let mut buf = QueueClearHandle(&mut self.buf);
         while let Some(c) = self.iter.next() {
-            //println!("span {}",c);
             buf.push(c);
-            match match buf.queue() {
+            match match &**buf {
                 // Label:
-                &[Ident(_), Symbol(':')] |
-                &[AnonLabel(_)] =>
-                    Some(Label { name: buf.spans[0].clone() }),
-                &[Ident(c), ref rest.., LineBreak] if &*c == "db" => Some(RawData {
+                &[ref name @ Ident(_), Symbol(':',_)] |
+                &[ref name @ AnonLabel(_)] =>
+                    Some(Label { name: name.clone() }),
+                &[Ident(ref c), ref rest.., LineBreak] if c.data == "db" => Some(RawData {
                     data: {
                         let mut dbuf = Vec::new();
                         let mut allow_comma = false;
                         // Allow any kind unless annotated as strict? TODO: local or global config based on attrs
-                        for (c,s) in rest.iter().zip(buf.spans.iter().skip(1)) {
+                        for c in rest.iter() {
                             match c {
                                 Whitespace => {},
-                                Symbol(',') if allow_comma => allow_comma = false,
-                                Byte(c) => { allow_comma = true; dbuf.write_u8(*c); },
-                                Word(c) => { allow_comma = true; dbuf.write_u16::<LittleEndian>(*c); },
-                                Long(c) => { allow_comma = true; dbuf.write_u24::<LittleEndian>(*c); },
-                                c => return Some(Err(ParseError::UnexpectedSymbol(s.clone())))
+                                Symbol(',',_) if allow_comma => allow_comma = false,
+                                Byte(c) => { allow_comma = true; dbuf.write_u8(c.data); },
+                                Word(c) => { allow_comma = true; dbuf.write_u16::<LittleEndian>(c.data); },
+                                Long(c) => { allow_comma = true; dbuf.write_u24::<LittleEndian>(c.data); },
+                                c => return Some(Err(ParseError::UnexpectedSymbol(c.clone())))
                             }
                         }
                         dbuf
                     }
                 }),
-                &[Ident(_), LineBreak] |
-                &[Ident(_), Whitespace, Symbol(':')] => Some(Instruction {
-                    name: buf.spans[0].clone(),
+                &[ref name @ Ident(_), LineBreak] |
+                &[ref name @ Ident(_), Whitespace, Symbol(':',_)] => Some(Instruction {
+                    name: name.clone(),
                     size: None,
-                    arg: Argument {
-                        kind: ArgumentKind::Implied,
-                        spans: Vec::new()
-                    }
+                    arg: Argument::parse(&[]).unwrap()
                 }),
-                &[Ident(_), Whitespace, ref rest.., LineBreak] |
-                &[Ident(_), Whitespace, ref rest.., Whitespace, Symbol(':')] => Some(Instruction {
-                    name: buf.spans[0].clone(),
+                &[ref name @ Ident(_), Whitespace, ref rest.., LineBreak] |
+                &[ref name @ Ident(_), Whitespace, ref rest.., Whitespace, Symbol(':',_)] => Some(Instruction {
+                    name: name.clone(),
                     size: None,
-                    arg: match Argument::parse(buf.spans.iter()
-                                         .skip(2).take(rest.len())
-                                         .filter(|c| !c.is_whitespace())
-                                         .cloned().collect()) {
+                    arg: match Argument::parse(rest) {
                         Ok(c) => c,
                         Err(e) => return Some(Err(e))
                     }
                 }),
-                &[Ident(_), Symbol('.'), Ident(_), Whitespace, ref rest.., LineBreak] |
-                &[Ident(_), Symbol('.'), Ident(_), Whitespace, ref rest.., Whitespace, Symbol(':')] => Some(Instruction {
-                    name: buf.spans[0].clone(),
-                    size: Some(match OpSize::parse(&buf.spans[2]) {
+                &[ref name @ Ident(_), Symbol('.',_), Ident(_), Whitespace, ref rest.., LineBreak] |
+                &[ref name @ Ident(_), Symbol('.',_), Ident(_), Whitespace, ref rest.., Whitespace, Symbol(':',_)] => Some(Instruction {
+                    name: name.clone(),
+                    size: Some(match OpSize::parse(&buf[2]) {
                         Ok(c) => c,
                         Err(e) => return Some(Err(e))
                     }),   // todo: fix panic
-                    arg: match Argument::parse(buf.spans.iter()
-                                         .skip(4).take(rest.len())
-                                         .filter(|c| !c.is_whitespace())
-                                         .cloned().collect()) {
+                    arg: match Argument::parse(rest) {
                         Ok(c) => c,
                         Err(e) => return Some(Err(e))
                     }
                 }),
-                &[Symbol('#'), Symbol('['), .., Symbol(']')] => Some(Attributes {
-                    attrs: buf.spans.iter().cloned().collect()
+                &[Symbol('#',_), Symbol('[',_), ref rest.., Symbol(']',_)] => Some(Attributes {
+                    attrs: rest.to_vec()
                 }),
                 &[Whitespace] | &[LineBreak] => None,
                 &[.., LineBreak] => return Some(Err(ParseError::GenericSyntaxError)),
@@ -329,7 +221,7 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                 None => buf.clear()
             }
         }
-        if buf.spans.len() > 0 {
+        if buf.len() > 0 {
             return Some(Err(ParseError::GenericSyntaxError))
         }
         None

@@ -11,12 +11,17 @@ use std::process;
 
 mod lexer;
 use lexer::Lexer;
+use lexer::Span;
 
 mod parser;
+
 use parser::Parser;
-use parser::ArgumentKind;
+use parser::Argument;
 use parser::Statement;
 
+mod addrmodes;
+
+use addrmodes::AddressingMode;
 mod instructions;
 
 fn run() -> Result<(),Box<Error>> {
@@ -30,16 +35,23 @@ fn run() -> Result<(),Box<Error>> {
     for l in parsed {
         let mut err = false;
         println!("{}", l.as_ref().map(|c| c.to_string()).unwrap_or_else(|c| format!("{:?}", c)));
-        if let Ok(Statement::Instruction { name, size, arg }) = l {
-            if err {
-                // no such pass yet
-                if let ArgumentKind::Label(_) | ArgumentKind::AnonLabel(_) = arg.kind { continue; }
-                if let Err(e) = instructions::write_instr(&mut output, name.as_ident().unwrap(), arg) {
-                    return Err(format!("{:?}",e).into())
+        if let Ok(Statement::Instruction { name, size, mut arg }) = l {
+            if !err {
+                //if let ArgumentKind::Label(_) | ArgumentKind::AnonLabel(_) = arg.kind { continue; }
+                if let Span::Ident(c) = arg.span {
+                    arg.span = Span::number(0, 2, c.start);
+                }
+                if let Span::AnonLabel(c) = arg.span {
+                    arg.span = Span::number(0, 2, c.start);
+                }
+                if let Err(e) = instructions::write_instr(&mut output, name.as_ident().unwrap(), AddressingMode::parse(arg).map_err(|_| "oof")?) {
+                    err = true;
+                    println!("{:?}",e);
                 }
             }
         } else {
-
+            //err = true;
+            println!("Some error lel");
         }
     }
     Ok(())
