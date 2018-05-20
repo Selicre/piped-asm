@@ -122,46 +122,47 @@ impl Banks {
 }
 
 fn header(entry: u16, nmi: u16) -> LabeledChunk {
+    ((|| {
     let mut chunk = LabeledChunk::default();
     // LOROM only, for now
     chunk.pin(0x7FC0);
     // 21 bytes:       ---------------------
-    chunk.data.write(b"SUPER MARIOWORLD     ");
-    chunk.data.write(&[
+    chunk.data.write_all(b"SUPER MARIOWORLD     ")?;
+    chunk.data.write_all(&[
     // ROM makeup, type, size (TODO!), SRAM size, creator ID (2 bytes)
         0x23, 0x35, 0x0C, 0x07, 0x01, 0x01,
     // Version #, checksum complement (2 bytes), checksum (2 bytes)
-        0x00, 0x2D, 0x67, 0xD2, 0x98 ]);
+        0x00, 0x2D, 0x67, 0xD2, 0x98 ])?;
     // interrupt vectors (TODO)
     // NATIVE
-    chunk.data.write_u16::<LittleEndian>(0xFFFF);
-    chunk.data.write_u16::<LittleEndian>(0xFFFF);
-    chunk.data.write_u16::<LittleEndian>(0xFFFF);   // COP enable
-    chunk.data.write_u16::<LittleEndian>(0xFFFF);   // BRK
-    chunk.data.write_u16::<LittleEndian>(0xFFFF);   // ABORT
-    chunk.data.write_u16::<LittleEndian>(nmi + 0x8000);      // NMI
-    chunk.data.write_u16::<LittleEndian>(0xFFFF);   // RESET (unused)
-    chunk.data.write_u16::<LittleEndian>(0xFFFF);   // IRQ
+    chunk.data.write_u16::<LittleEndian>(0xFFFF)?;
+    chunk.data.write_u16::<LittleEndian>(0xFFFF)?;
+    chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // COP enable
+    chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // BRK
+    chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // ABORT
+    chunk.data.write_u16::<LittleEndian>(nmi + 0x8000)?;      // NMI
+    chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // RESET (unused)
+    chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // IRQ
     // EMULATION
-    chunk.data.write_u16::<LittleEndian>(0xFFFF);
-    chunk.data.write_u16::<LittleEndian>(0xFFFF);
-    chunk.data.write_u16::<LittleEndian>(0xFFFF);   // COP enable
-    chunk.data.write_u16::<LittleEndian>(0xFFFF);   // unused
-    chunk.data.write_u16::<LittleEndian>(0xFFFF);   // ABORT
-    chunk.data.write_u16::<LittleEndian>(0xFFFF);   // NMI
-    chunk.data.write_u16::<LittleEndian>(entry + 0x8000);    // RESET (execution begins here)
-    chunk.data.write_u16::<LittleEndian>(0xFFFF);   // IRQ
+    chunk.data.write_u16::<LittleEndian>(0xFFFF)?;
+    chunk.data.write_u16::<LittleEndian>(0xFFFF)?;
+    chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // COP enable
+    chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // unused
+    chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // ABORT
+    chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // NMI
+    chunk.data.write_u16::<LittleEndian>(entry + 0x8000)?;    // RESET (execution begins here)
+    chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // IRQ
     assert_eq!(chunk.data.len(), 0x40);
-    chunk
+    Ok(chunk) })(): Result<_,Box<Error>>).unwrap()
 }
 
 
-pub fn link<W: Write, I: Iterator<Item=(String,LabeledChunk)>>(mut writer: W, iter: I) {
+pub fn link<W: Write, I: Iterator<Item=(String,LabeledChunk)>>(writer: W, iter: I) {
     let mut banks = Banks::new();
     for (name,block) in iter {
         banks.append(name,block);
     }
-    banks.write_to(writer);
+    banks.write_to(writer).unwrap();
     /*
     // calculate effective PC offsets, this will be moved earlier in the pipeline later
     let size_offsets = chunks.iter().fold((LinkedHashMap::new(), 0), |mut acc, elt| {

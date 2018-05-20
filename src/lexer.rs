@@ -55,7 +55,6 @@ impl<I: Iterator<Item=char>> Iterator for LocationTracker<I> {
     }
 }
 
-#[derive(Debug)]
 pub struct Lexer<I> {
     inner: LexerInner<I>,
     finished: bool
@@ -71,7 +70,7 @@ impl<R: Iterator<Item=char>> Lexer<R> {
     }
 }
 
-impl<R: Iterator<Item=char> + ::std::fmt::Debug> Iterator for Lexer<R> {
+impl<R: Iterator<Item=char>> Iterator for Lexer<R> {
     type Item = Span;
     fn next(&mut self) -> Option<Span> {
         // Post-processing.
@@ -87,7 +86,6 @@ impl<R: Iterator<Item=char> + ::std::fmt::Debug> Iterator for Lexer<R> {
 }
 
 
-#[derive(Debug)]
 pub struct LexerInner<I>(LocationTracker<I>);
 
 // TODO: invert the structure for easier matching
@@ -121,11 +119,12 @@ impl<T> SpanData<T> {
 pub enum Span {
     Ident(SpanData<String>),
     Symbol(char, SpanData<char>),   // way easier matching
-    Number(SpanData<u32>),
-    Byte(SpanData<u32>),
-    Word(SpanData<u32>),
-    Long(SpanData<u32>),
-    AnonLabel(SpanData<i32>),
+    Number(SpanData<i32>),
+    Byte(SpanData<i32>),
+    Word(SpanData<i32>),
+    Long(SpanData<i32>),
+    PosLabel(SpanData<usize>),
+    NegLabel(SpanData<usize>),
     Successive(Vec<Span>),
     NumberError(SpanData<()>),
     Whitespace,
@@ -154,7 +153,7 @@ pub struct Span {
     pub start: Location,
     pub length: u32
 }*/
-
+/*
 impl Display for Span {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use self::Span::*;
@@ -165,7 +164,8 @@ impl Display for Span {
             Byte(ref s) => write!(f, "byte ${:02X}", s),
             Word(ref s) => write!(f, "word ${:04X}", s),
             Long(ref s) => write!(f, "long ${:06X}", s),
-            AnonLabel(ref s) => write!(f, "anonymous label (depth {})", s),
+            PosLabel(ref s) => write!(f, "positive anonymous label (depth {})", s),
+            NegLabel(ref s) => write!(f, "negative anonymous label (depth {})", s),
             Successive(ref _s) => write!(f, "several spans"),   // TODO
             NumberError(_) => write!(f, "malformed number"),
             Whitespace => write!(f, "whitespace"),
@@ -173,7 +173,7 @@ impl Display for Span {
             Empty => write!(f, "empty span"),
         }
     }
-}
+}*/
 
 impl Span {
     pub fn as_ident(&self) -> Option<&str> {
@@ -195,16 +195,31 @@ impl Span {
         ::std::mem::swap(self, &mut out);
         out
     }
+    pub fn is_local_label(&self) -> Option<(usize, &Span)> {
+        if let Span::Successive(c) = self {
+            if let [ref dots.., ref span @ Span::Ident(_)] = &**c {
+                if dots.iter().all(|c| if let Span::Symbol('.',_) = c { true } else { false }) {
+                    return Some((dots.len(), span))
+                }
+            }
+        }
+        None
+    }
+    pub fn coagulate(entries: &[Span]) -> Span {
+        if entries.len() == 0 { Span::Empty }
+        else if entries.len() == 1 { entries[0].clone() }
+        else { Span::Successive(entries.iter().cloned().collect()) }
+    }
     pub fn ident(data: String, length: u32, start: Location) -> Self {
         Span::Ident(SpanData { data, start, length })
     }
     pub fn symbol(data: char, start: Location) -> Self {
         Span::Symbol(data, SpanData { data, start, length: 1 })
     }
-    pub fn number(data: u32, length: u32, start: Location) -> Self {
+    pub fn number(data: i32, length: u32, start: Location) -> Self {
         Span::Number(SpanData { data, start, length })
     }
-    pub fn hex_number(data: u32, length: u32, start: Location) -> Self {
+    pub fn hex_number(data: i32, length: u32, start: Location) -> Self {
         // Span includes the $ so lengths are + 1
         let f = if length > 5 { Span::Long }
         else if length > 3 { Span::Word }
@@ -220,8 +235,11 @@ impl Span {
     pub fn line_break(start: Location) -> Self {
         Span::LineBreak
     }
-    pub fn anon_label(data: i32, length: u32, start: Location) -> Self {
-        Span::AnonLabel(SpanData { data, start, length })
+    pub fn pos_label(data: usize, length: u32, start: Location) -> Self {
+        Span::PosLabel(SpanData { data, start, length })
+    }
+    pub fn neg_label(data: usize, length: u32, start: Location) -> Self {
+        Span::NegLabel(SpanData { data, start, length })
     }
     pub fn is_whitespace(&self) -> bool {
         if let Span::Whitespace | Span::LineBreak = self { true } else { false }
@@ -229,7 +247,7 @@ impl Span {
 }
 
 
-impl<R: Iterator<Item=char> + ::std::fmt::Debug> Iterator for LexerInner<R> {
+impl<R: Iterator<Item=char>> Iterator for LexerInner<R> {
     type Item = Span;
     fn next(&mut self) -> Option<Span> {
         //println!("{:?}", self);
@@ -246,7 +264,7 @@ impl<R: Iterator<Item=char> + ::std::fmt::Debug> Iterator for LexerInner<R> {
             '0' ... '9' => { // dec number
                 let mut buf = 0;
                 while let Some('0' ... '9') = iter.peek() {
-                    buf = buf * 10 + iter.next()?.to_digit(10)?;
+                    buf = buf * 10 + iter.next()?.to_digit(10)? as i32;
                     // bounds check
                     if buf > 0xFFFFFF {
                         // skip to where the number ends
@@ -260,7 +278,7 @@ impl<R: Iterator<Item=char> + ::std::fmt::Debug> Iterator for LexerInner<R> {
                 iter.next();
                 let mut buf = 0;
                 while let Some('0' ... '9') | Some('A' ... 'F') | Some('a' ... 'f') = iter.peek() {
-                    buf = buf * 16 + iter.next()?.to_digit(16)?;
+                    buf = buf * 16 + iter.next()?.to_digit(16)? as i32;
                     // bounds check
                     if buf > 0xFFFFFF {
                         // skip to where the number ends
@@ -274,7 +292,7 @@ impl<R: Iterator<Item=char> + ::std::fmt::Debug> Iterator for LexerInner<R> {
                 iter.next();
                 let mut buf = 0;
                 while let Some('0' ... '1') = iter.peek() {
-                    buf = buf * 2 + iter.next()?.to_digit(2)?;
+                    buf = buf * 2 + iter.next()?.to_digit(2)? as i32;
                     // bounds check
                     if buf > 0xFFFFFF {
                         // skip to where the number ends
@@ -290,15 +308,15 @@ impl<R: Iterator<Item=char> + ::std::fmt::Debug> Iterator for LexerInner<R> {
                     amt += 1;
                     iter.next();
                 }
-                Some(Span::anon_label(amt, iter.length(&start), start))
+                Some(Span::pos_label(amt-1, iter.length(&start), start))
             },
             '-' => {
                 let mut amt = 0;
                 while let Some('-') = iter.peek() {
-                    amt -= 1;
+                    amt += 1;
                     iter.next();
                 }
-                Some(Span::anon_label(amt, iter.length(&start), start))
+                Some(Span::neg_label(amt-1, iter.length(&start), start))
             },
             '\n' | ' ' | '\t' | ';' => {
                 let mut is_comment = false;

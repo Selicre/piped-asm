@@ -91,8 +91,8 @@ impl AddressingMode {
             (Indirect,Word) => AbsInd(val as u16),
             (IndX,Word) => AbsIndX(val as u16),
             (IndLong,Word) => AbsIndLong(val as u16),
-            (Direct,Long) => AbsLong(val),
-            (IndexedX,Long) => AbsLongX(val),
+            (Direct,Long) => AbsLong(val as u32),
+            (IndexedX,Long) => AbsLongX(val as u32),
             (TwoArgs(Span::Byte(c1),Span::Byte(c2)),_) => BlockMove(c1.data as u8, c2.data as u8),
 
             (Direct,RelByte) => Relative(val as i8),

@@ -39,28 +39,31 @@ impl Argument {
     fn implied() -> Self {
         Argument { kind: ArgumentKind::Implied, span: Span::Empty }
     }
-    fn parse(spans: &[Span]) -> Result<Self, ParseError> {
+    fn parse(spans: &mut [Span]) -> Result<Self, ParseError> {
         use self::Span::*;
         use self::ArgumentKind::*;
         //spans.iter().for_each(|s| println!("{}", s));
-        // Potentially avoid cloning? Mostly numbers anyway though so
-        let (kind, span) = match spans {
-            &[] => (Implied, Empty),
-            &[ref c] => (Direct, c.clone()),
-            &[Symbol('#',_), ref c] => (Constant, c.clone()),
-            &[ref c, Symbol(',',_), Ident(ref x)] if x.data == "x" => (IndexedX, c.clone()),
-            &[ref c, Symbol(',',_), Ident(ref y)] if y.data == "y" => (IndexedY, c.clone()),
-            &[Symbol('(',_), ref c, Symbol(')',_)] => (Indirect, c.clone()),
-            &[Symbol('(',_), ref c, Symbol(',',_), Ident(ref x), Symbol(')',_)] if x.data == "x" => (IndX, c.clone()),
-            &[Symbol('(',_), ref c, Symbol(')',_), Symbol(',',_), Ident(ref y)] if y.data == "y" => (IndY, c.clone()),
-            &[Symbol('[',_), ref c, Symbol(']',_)] => (IndLong, c.clone()),
-            &[Symbol('[',_), ref c, Symbol(']',_), Symbol(',',_), Ident(ref y)] if y.data == "y" => (IndLongY, c.clone()),
-            &[ref c, Symbol(',',_), Ident(ref s)] if s.data == "s" => (Stack, c.clone()),
-            &[Symbol('(',_), ref c, Symbol(',',_), Ident(ref s), Symbol(')',_), Symbol(',',_), Ident(ref y)] if s.data == "s" && y.data == "y" => (StackY, c.clone()),
-            &[Symbol('#',_), ref c1, Symbol(',',_), Symbol('#',_), ref c2] => (TwoArgs(c1.clone(), c2.clone()), Empty),
-            &[ref c1, Symbol(',',_), ref c2] => (TwoArgs(c1.clone(), c2.clone()), Empty),
-            c => return Err(ParseError::UnknownAddressingMode(c[0].clone()))
+        let empty = &[Span::Empty][..];
+        // todo: add expression parsing?
+        let (kind, spans) = match spans {
+            [] => (Implied, empty),
+            [ref c.., Symbol(',',_), Ident(ref x)] if x.data == "x" => (IndexedX, c),
+            [ref c.., Symbol(',',_), Ident(ref y)] if y.data == "y" => (IndexedY, c),
+            [Symbol('(',_), ref c.., Symbol(',',_), Ident(ref x), Symbol(')',_)] if x.data == "x" => (IndX, c),
+            [Symbol('(',_), ref c.., Symbol(')',_), Symbol(',',_), Ident(ref y)] if y.data == "y" => (IndY, c),
+            [Symbol('[',_), ref c.., Symbol(']',_)] => (IndLong, c),
+            [Symbol('[',_), ref c.., Symbol(']',_), Symbol(',',_), Ident(ref y)] if y.data == "y" => (IndLongY, c),
+            [ref c.., Symbol(',',_), Ident(ref s)] if s.data == "s" => (Stack, c),
+            [Symbol('(',_), ref c.., Symbol(',',_), Ident(ref s), Symbol(')',_), Symbol(',',_), Ident(ref y)] if s.data == "s" && y.data == "y" => (StackY, c),
+            [Symbol('(',_), ref c.., Symbol(')',_)] => (Indirect, c),
+            // TODO: properly fix block syntax
+            [Symbol('#',_), ref c1, Symbol(',',_), Symbol('#',_), ref c2] => (TwoArgs(c1.clone(), c2.clone()), empty),
+            [ref c1, Symbol(',',_), ref c2] => (TwoArgs(c1.clone(), c2.clone()), empty),
+            [Symbol('#',_), ref c..] => (Constant, c),
+            [ref c..] => (Direct, c),
         };
+        // Potentially avoid cloning? Mostly numbers anyway though so
+        let span = Span::coagulate(spans);
         Ok(Argument { kind, span })
     }
 }
@@ -86,7 +89,7 @@ pub enum Statement {
         attrs: Vec<Span>
     }
 }
-
+/*
 impl fmt::Display for Statement {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use self::Statement::*;
@@ -104,7 +107,7 @@ impl fmt::Display for Statement {
         }
     }
 }
-
+*/
 
 #[derive(Debug)]
 pub enum ParseError {
@@ -168,10 +171,12 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
             return Ok(Some(match &mut **buf {
                 // Label:
                 [ref mut name @ Ident(_), Symbol(':',_)] |
-                [ref mut name @ AnonLabel(_)] =>
+                [ref mut name @ PosLabel(_)] | [ref mut name @ NegLabel(_)]=>
                     Label { name: name.take() },
                 // TODO: local labels
-                //[ref rest.., ref mut name @ 
+                [Symbol('.',_), ref mut name @ Ident(_), Symbol(':',_)] => {
+                    LocalLabel { depth: 1, name: name.take() }
+                }
                 [Ident(ref c), ref rest.., LineBreak] if c.data == "db" => RawData {
                     data: {
                         let mut dbuf = Vec::new();
@@ -183,7 +188,7 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                                 Symbol(',',_) if allow_comma => allow_comma = false,
                                 Byte(c) => { allow_comma = true; dbuf.write_u8(c.data as u8).unwrap(); },
                                 Word(c) => { allow_comma = true; dbuf.write_u16::<LittleEndian>(c.data as u16).unwrap(); },
-                                Long(c) => { allow_comma = true; dbuf.write_u24::<LittleEndian>(c.data).unwrap(); },
+                                Long(c) => { allow_comma = true; dbuf.write_u24::<LittleEndian>(c.data as u32).unwrap(); },
                                 c => return Err(ParseError::UnexpectedSymbol(c.clone()))
                             }
                         }
@@ -194,16 +199,16 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                 [ref mut name @ Ident(_), Whitespace, Symbol(':',_)] => Instruction {
                     name: name.take(),
                     size: Default::default(),
-                    arg: Argument::parse(&[]).unwrap()
+                    arg: Argument::parse(&mut []).unwrap()
                 },
-                [ref mut name @ Ident(_), Whitespace, ref rest.., LineBreak] |
-                [ref mut name @ Ident(_), Whitespace, ref rest.., Whitespace, Symbol(':',_)] => Instruction {
+                [ref mut name @ Ident(_), Whitespace, ref mut rest.., LineBreak] |
+                [ref mut name @ Ident(_), Whitespace, ref mut rest.., Whitespace, Symbol(':',_)] => Instruction {
                     name: name.take(),
                     size: Default::default(),
                     arg: Argument::parse(rest)?
                 },
-                [ref mut name @ Ident(_), Symbol('.',_), ref mut size @ Ident(_), Whitespace, ref rest.., LineBreak] |
-                [ref mut name @ Ident(_), Symbol('.',_), ref mut size @ Ident(_), Whitespace, ref rest.., Whitespace, Symbol(':',_)]
+                [ref mut name @ Ident(_), Symbol('.',_), ref mut size @ Ident(_), Whitespace, ref mut rest.., LineBreak] |
+                [ref mut name @ Ident(_), Symbol('.',_), ref mut size @ Ident(_), Whitespace, ref mut rest.., Whitespace, Symbol(':',_)]
                     => Instruction {
                     name: name.take(),
                     size: (SizeHint::parse(size.as_ident().unwrap()).ok_or(ParseError::GenericSyntaxError)?, Some(size.take())),

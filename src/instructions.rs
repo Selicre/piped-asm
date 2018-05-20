@@ -46,6 +46,16 @@ impl SizeHint {
             _ => return None
         })
     }
+    pub fn bytes(self) -> Option<usize> {
+        use self::SizeHint::*;
+        Some(match self {
+            Implicit => 0,
+            RelByte | Byte => 1,
+            RelWord | Word => 2,
+            Long => 3,
+            _ => return None
+        })
+    }
     pub fn is_relative(self) -> bool {
         use self::SizeHint::*;
         match self {

@@ -11,6 +11,10 @@ use instructions::SizeHint;
 
 use addrmodes::AddressingMode;
 
+use byteorder::LittleEndian;
+use std::io::Write;
+use byteorder::WriteBytesExt;
+
 
 struct CompilerContext {
     local: CtxInner,
@@ -99,9 +103,10 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
         // run out of memory, that is your fault
         // You can't jump to an anonymous label across a non-local label because that prevents
         // reordering
-        //let pos_labels = Vec::new();
+        let mut pos_labels: Vec<Vec<(SizeHint, usize)>> = Vec::new();
         let mut neg_labels = Vec::new();
         let mut labels = HashMap::new();
+        let mut labels_used: Vec<(SizeHint, usize, Span)> = Vec::new();
         loop {
             let c = if let Some(c) = self.inner.next() { c } else {
                 return match self.next_label.take() {
@@ -110,30 +115,51 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
                     _ => unreachable!()
                 };
             };
+
             match c {
                 // Split here
                 Label { name: mut name @ Span::Ident(_) } => {
-                    // todo: all the label bullshit
+                    {
+                        // merge all local labels (todo: extract this into a diff function)
+                        use std::io::{Cursor, Write, Seek, SeekFrom};
+                        let mut cursor = Cursor::new(&mut chunk.data);
+                        for (size, addr, name) in labels_used.iter() {
+                            let offset = labels[name.as_ident().unwrap()];
+                            // replace the address at i+1 with current
+                            cursor.seek(SeekFrom::Start(*addr as u64 + 1)).unwrap();
+                            match size {
+                                SizeHint::RelByte => cursor.write_i8((offset - addr - 2) as i8).unwrap(),
+                                SizeHint::RelWord => cursor.write_i16::<LittleEndian>((offset - addr - 2) as i16).unwrap(),
+                                _ => panic!("can't into absolute anonymous labels yet")
+                            };
+                        }
+                    }
                     mem::swap(&mut self.next_label, &mut name);
                     let c = if let Span::Ident(c) = name { c } else { unreachable!() };
                     return Ok(Some((c.data, chunk)));
                 },
-                Label { name: Span::AnonLabel(c) } => {
-                    match c.data {
-                        c if c > 0 => {
-                            let c = c - 1;
-                            panic!("positive labels soon");
-                            //pos_labels.push()
-                        },
-                        c if c < 0 => {
-                            let c = (1 - c) as usize;
-                            if neg_labels.len() < c { neg_labels.resize(c, None); }
-                            neg_labels[c] = Some(chunk.data.len())
-                        },
-                        _ => unreachable!()
+                Label { name: Span::NegLabel(c) } => {
+                    let c = c.data;
+                    if neg_labels.len() < c+1 { neg_labels.resize(c+1, None); }
+                    neg_labels[c] = Some(chunk.data.len())
+                },
+                Label { name: Span::PosLabel(c) } => {
+                    use std::io::{Cursor, Write, Seek, SeekFrom};
+                    let offset = chunk.data.len();
+                    let mut cursor = Cursor::new(&mut chunk.data);
+                    let c = c.data;
+                    for (size, addr) in pos_labels.get(c).map(|c| c.iter()).into_iter().flatten() {
+                        // replace the address at i+1 with current
+                        cursor.seek(SeekFrom::Start(*addr as u64 + 1)).unwrap();
+                        match size {
+                            SizeHint::RelByte => cursor.write_i8((offset - addr - 2) as i8).unwrap(),
+                            SizeHint::RelWord => cursor.write_i16::<LittleEndian>((offset - addr - 2) as i16).unwrap(),
+                            _ => panic!("can't into absolute anonymous labels yet")
+                        };
                     }
                 },
                 LocalLabel { depth: _, name: Span::Ident(c) } => {
+                    // todo: reset depth
                     labels.insert(c.data, chunk.data.len());
                 },
                 RawData { data } => {
@@ -144,18 +170,47 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
                     // TODO: check for modification of compiler context (e.g. static size
                     // checking)
                     let mut s = SizeHint::Unspecified;
-                    if let Span::Ident(c) = arg.span {
-                        // add shit to hashmap
-                        // also cover other variants
-                        let d = c.replace(0);
-                        s = s.and_then(instructions::size_hint(&name.as_ident().unwrap().to_uppercase()));
-                        s = s.and_then(size.0);
-                        chunk.label_refs.push(LabelRef { offset: chunk.data.len(), size: s, label: c.data });
-                        arg.span = Span::Number(d);
-                    } else {
-                        s = s.and_then(size.0);
+                    match arg.span {
+                        Span::Ident(c) => {
+                            // also cover other variants
+                            let d = c.replace(0);
+                            s = s.and_then(instructions::size_hint(&name.as_ident().unwrap().to_uppercase()));
+                            s = s.and_then(size.0);
+                            chunk.label_refs.push(LabelRef { offset: chunk.data.len(), size: s, label: c.data });
+                            arg.span = Span::Number(d);
+                        },
+                        Span::NegLabel(c) => {
+                            let label = neg_labels.get(c.data).expect("pls").expect("what");
+                            // todo: reduce duplication (same thing is in the linker)
+                            let d = c.replace(label as i32 - chunk.data.len() as i32 - 2);
+                            s = s.and_then(instructions::size_hint(&name.as_ident().unwrap().to_uppercase()));
+                            s = s.and_then(size.0);
+                            arg.span = Span::Number(d);
+                        },
+                        Span::PosLabel(c) => {
+                            if pos_labels.len() < c.data+1 { pos_labels.resize(c.data+1, Vec::new()); }
+                            let d = c.replace(0);
+                            s = s.and_then(instructions::size_hint(&name.as_ident().unwrap().to_uppercase()));
+                            s = s.and_then(size.0);
+                            pos_labels[c.data].push((s, chunk.data.len()));
+                            arg.span = Span::Number(d);
+                        },
+                        // This is a local label for now.
+                        ref mut c @ Span::Successive(_) => {
+                            let mut d = None;
+                            if let Some((depth, label)) = c.is_local_label() {
+                                let l = if let Span::Ident(l) = label { l } else { panic!() };
+                                d = Some(l.replace(0));
+                                s = s.and_then(instructions::size_hint(&name.as_ident().unwrap().to_uppercase()));
+                                s = s.and_then(size.0);
+                                if depth > 1 { panic!("too deep b"); }
+                                labels_used.push((s, chunk.data.len(), label.clone()));
+                            }
+                            *c = Span::Number(d.unwrap());
+                        },
+                        _ => s = s.and_then(size.0),
                     }
-                    let arg = AddressingMode::parse(arg, s).map_err(|_| { print!("uhh {}", name); panic!() })?;
+                    let arg = AddressingMode::parse(arg, s).map_err(|_| { print!("uhh {:?}", name); panic!() })?;
                     
                     SInstruction::new(name.as_ident().unwrap(), arg).write_to(&mut chunk.data).unwrap();
                 },
