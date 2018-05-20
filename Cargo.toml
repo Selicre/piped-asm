@@ -5,3 +5,4 @@ authors = ["x10A94 <hyperpone@gmail.com>"]
 
 [dependencies]
 byteorder = "1.2"
+linked-hash-map = "0.5"

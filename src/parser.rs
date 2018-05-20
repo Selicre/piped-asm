@@ -6,6 +6,8 @@ use std::io::{self,Write};
 
 use lexer::{Span,SpanData};
 
+use instructions::SizeHint;
+
 use byteorder::{WriteBytesExt,LittleEndian};
 
 #[derive(Debug)]
@@ -34,7 +36,9 @@ pub struct Argument {
 
 
 impl Argument {
-    // TODO: make this less stupid, pass the relevant spanqueue part instead
+    fn implied() -> Self {
+        Argument { kind: ArgumentKind::Implied, span: Span::Empty }
+    }
     fn parse(spans: &[Span]) -> Result<Self, ParseError> {
         use self::Span::*;
         use self::ArgumentKind::*;
@@ -60,34 +64,20 @@ impl Argument {
         Ok(Argument { kind, span })
     }
 }
-#[derive(Debug,Clone)]
-pub enum OpSize {
-    Byte,
-    Word,
-    Long,
-}
-impl OpSize {
-    fn parse(s: &Span) -> Result<(OpSize,Span),ParseError> {
-        if let Some(t) = s.as_ident() {
-            Ok((match t {
-                "l" => OpSize::Long,
-                "w" => OpSize::Word,
-                "b" => OpSize::Byte,
-                _ => return Err(ParseError::InvalidOpSize(s.clone()))
-            }, s.clone()))
-        } else { panic!("compiler broke: op size not an ident") }
-    }
-}
 
 #[derive(Debug)]
 pub enum Statement {
     Label {
         name: Span
     },
+    LocalLabel {
+        depth: u8,
+        name: Span
+    },
     Instruction {
         name: Span,
-        size: Option<(OpSize,Span)>,
-        arg: Argument   // TODO: parse this later?
+        size: (SizeHint,Option<Span>),
+        arg: Argument
     },
     RawData {
         data: Vec<u8>,
@@ -102,6 +92,7 @@ impl fmt::Display for Statement {
         use self::Statement::*;
         match self {
             Label { name } => write!(f, "Label {}", name),
+            LocalLabel { depth, name } => write!(f, "Local label {}", name),
             Instruction { name, size, arg } => write!(f, "Instruction: {}, argument: {:?}", name, arg),
             Attributes { attrs } => write!(f, "Attributes (unused yet)"),
             RawData { data } => {
@@ -158,14 +149,30 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
         use self::Span::*;
         use self::Statement::*;
         let mut buf = QueueClearHandle(&mut self.buf);
-        while let Some(c) = self.iter.next() {
+        let iter = &mut self.iter;
+        let mut clear = false;
+        let res = (|| loop {
+            if clear {
+                buf.clear();
+                clear = false;
+            }
+            let c = if let Some(c) = iter.next() { c } else {
+                // The stream has ended but we can't parse the end
+                if buf.len() > 0 {
+                    return Err(ParseError::GenericSyntaxError)
+                } else {
+                    return Ok(None)
+                }
+            };
             buf.push(c);
-            match match &mut **buf {
+            return Ok(Some(match &mut **buf {
                 // Label:
                 [ref mut name @ Ident(_), Symbol(':',_)] |
                 [ref mut name @ AnonLabel(_)] =>
-                    Some(Label { name: name.take() }),
-                [Ident(ref c), ref rest.., LineBreak] if c.data == "db" => Some(RawData {
+                    Label { name: name.take() },
+                // TODO: local labels
+                //[ref rest.., ref mut name @ 
+                [Ident(ref c), ref rest.., LineBreak] if c.data == "db" => RawData {
                     data: {
                         let mut dbuf = Vec::new();
                         let mut allow_comma = false;
@@ -174,56 +181,46 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                             match c {
                                 Whitespace => {},
                                 Symbol(',',_) if allow_comma => allow_comma = false,
-                                Byte(c) => { allow_comma = true; dbuf.write_u8(c.data); },
-                                Word(c) => { allow_comma = true; dbuf.write_u16::<LittleEndian>(c.data); },
-                                Long(c) => { allow_comma = true; dbuf.write_u24::<LittleEndian>(c.data); },
-                                c => return Some(Err(ParseError::UnexpectedSymbol(c.clone())))
+                                Byte(c) => { allow_comma = true; dbuf.write_u8(c.data as u8).unwrap(); },
+                                Word(c) => { allow_comma = true; dbuf.write_u16::<LittleEndian>(c.data as u16).unwrap(); },
+                                Long(c) => { allow_comma = true; dbuf.write_u24::<LittleEndian>(c.data).unwrap(); },
+                                c => return Err(ParseError::UnexpectedSymbol(c.clone()))
                             }
                         }
                         dbuf
                     }
-                }),
+                },
                 [ref mut name @ Ident(_), LineBreak] |
-                [ref mut name @ Ident(_), Whitespace, Symbol(':',_)] => Some(Instruction {
+                [ref mut name @ Ident(_), Whitespace, Symbol(':',_)] => Instruction {
                     name: name.take(),
-                    size: None,
+                    size: Default::default(),
                     arg: Argument::parse(&[]).unwrap()
-                }),
+                },
                 [ref mut name @ Ident(_), Whitespace, ref rest.., LineBreak] |
-                [ref mut name @ Ident(_), Whitespace, ref rest.., Whitespace, Symbol(':',_)] => Some(Instruction {
+                [ref mut name @ Ident(_), Whitespace, ref rest.., Whitespace, Symbol(':',_)] => Instruction {
                     name: name.take(),
-                    size: None,
-                    arg: match Argument::parse(rest) {
-                        Ok(c) => c,
-                        Err(e) => return Some(Err(e))
-                    }
-                }),
-                [ref mut name @ Ident(_), Symbol('.',_), ref size @ Ident(_), Whitespace, ref rest.., LineBreak] |
-                [ref mut name @ Ident(_), Symbol('.',_), ref size @ Ident(_), Whitespace, ref rest.., Whitespace, Symbol(':',_)] => Some(Instruction {
+                    size: Default::default(),
+                    arg: Argument::parse(rest)?
+                },
+                [ref mut name @ Ident(_), Symbol('.',_), ref mut size @ Ident(_), Whitespace, ref rest.., LineBreak] |
+                [ref mut name @ Ident(_), Symbol('.',_), ref mut size @ Ident(_), Whitespace, ref rest.., Whitespace, Symbol(':',_)]
+                    => Instruction {
                     name: name.take(),
-                    size: Some(match OpSize::parse(size) {
-                        Ok(c) => c,
-                        Err(e) => return Some(Err(e))
-                    }),   // todo: fix panic
-                    arg: match Argument::parse(rest) {
-                        Ok(c) => c,
-                        Err(e) => return Some(Err(e))
-                    }
-                }),
-                [Symbol('#',_), Symbol('[',_), ref rest.., Symbol(']',_)] => Some(Attributes {
+                    size: (SizeHint::parse(size.as_ident().unwrap()).ok_or(ParseError::GenericSyntaxError)?, Some(size.take())),
+                    arg: Argument::parse(rest)?
+                },
+                [Symbol('#',_), Symbol('[',_), ref rest.., Symbol(']',_)] => Attributes {
                     attrs: rest.to_vec()
-                }),
-                [Whitespace] | [LineBreak] => None,
-                [.., LineBreak] => return Some(Err(ParseError::GenericSyntaxError)),
+                },
+                [Whitespace] | [LineBreak] => { clear = true; continue; },
+                [.., LineBreak] => return Err(ParseError::GenericSyntaxError),
                 _ => continue
-            } {
-                Some(c) => return Some(Ok(c)),
-                None => buf.clear()
-            }
+            }));
+        })();
+        match res {
+            Ok(Some(c)) => Some(Ok(c)),
+            Ok(None) => None,
+            Err(e) => Some(Err(e))
         }
-        if buf.len() > 0 {
-            return Some(Err(ParseError::GenericSyntaxError))
-        }
-        None
     }
 }

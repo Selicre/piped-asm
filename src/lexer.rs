@@ -3,7 +3,7 @@ use std::ops;
 use std::rc::Rc;
 use std::fmt::{self, Display};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Location {
     line: u32,
     column: u32,
@@ -111,19 +111,26 @@ impl<T: fmt::UpperHex> fmt::UpperHex for SpanData<T> {
     }
 }
 
+impl<T> SpanData<T> {
+    pub fn replace<U>(&self, new: U) -> SpanData<U> {
+        SpanData { data: new, start: self.start.clone(), length: self.length }
+    }
+}
+
 #[derive(Debug,Clone)]
 pub enum Span {
     Ident(SpanData<String>),
     Symbol(char, SpanData<char>),   // way easier matching
-    Byte(SpanData<u8>),
-    Word(SpanData<u16>),
+    Number(SpanData<u32>),
+    Byte(SpanData<u32>),
+    Word(SpanData<u32>),
     Long(SpanData<u32>),
     AnonLabel(SpanData<i32>),
     Successive(Vec<Span>),
     NumberError(SpanData<()>),
     Whitespace,
     LineBreak,
-    Empty        // For the parser to use
+    Empty
 }
 
 /*
@@ -154,6 +161,7 @@ impl Display for Span {
         match self {
             Ident(ref s) => write!(f, "ident {}", s),
             Symbol(_, ref s) => write!(f, "symbol {}", s),
+            Number(ref s) => write!(f, "number {}", s),
             Byte(ref s) => write!(f, "byte ${:02X}", s),
             Word(ref s) => write!(f, "word ${:04X}", s),
             Long(ref s) => write!(f, "long ${:06X}", s),
@@ -175,6 +183,13 @@ impl Span {
             None
         }
     }
+    pub fn take_ident(self) -> Option<String> {
+        if let Span::Ident(s) = self {
+            Some(s.data)
+        } else {
+            None
+        }
+    }
     pub fn take(&mut self) -> Self {
         let mut out = Span::Empty;
         ::std::mem::swap(self, &mut out);
@@ -187,23 +202,14 @@ impl Span {
         Span::Symbol(data, SpanData { data, start, length: 1 })
     }
     pub fn number(data: u32, length: u32, start: Location) -> Self {
-        if length > 5 || data > 0xFFFF {
-            Span::Long(SpanData { data, start, length })
-        } else if length > 3 || data > 0x00FF {
-            Span::Word(SpanData { data: data as u16, start, length })
-        } else {
-            Span::Byte(SpanData { data: data as u8, start, length })
-        }
+        Span::Number(SpanData { data, start, length })
     }
     pub fn hex_number(data: u32, length: u32, start: Location) -> Self {
         // Span includes the $ so lengths are + 1
-        if length > 5 {
-            Span::Long(SpanData { data, start, length })
-        } else if length > 3 {
-            Span::Word(SpanData { data: data as u16, start, length })
-        } else {
-            Span::Byte(SpanData { data: data as u8, start, length })
-        }
+        let f = if length > 5 { Span::Long }
+        else if length > 3 { Span::Word }
+        else { Span::Byte };
+        f(SpanData { data, start, length })
     }
     pub fn number_error(length: u32, start: Location) -> Self {
         Span::NumberError(SpanData { data: (), start, length })
@@ -263,6 +269,20 @@ impl<R: Iterator<Item=char> + ::std::fmt::Debug> Iterator for LexerInner<R> {
                     }
                 }
                 Some(Span::hex_number(buf, iter.length(&start), start))
+            },
+            '%' => {        // binary number
+                iter.next();
+                let mut buf = 0;
+                while let Some('0' ... '1') = iter.peek() {
+                    buf = buf * 2 + iter.next()?.to_digit(2)?;
+                    // bounds check
+                    if buf > 0xFFFFFF {
+                        // skip to where the number ends
+                        while let Some('0' ... '1') = iter.peek() {}
+                        return Some(Span::number_error(iter.length(&start), start))
+                    }
+                }
+                Some(Span::number(buf, iter.length(&start), start))
             },
             '+' => {
                 let mut amt = 0;
