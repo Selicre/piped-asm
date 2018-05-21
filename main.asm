@@ -8,7 +8,7 @@ Start:
 	STZ $420D	; slow rom access
 	STZ $420B	; \ disable any (H)DMA
 	STZ $420C	; /
-	LDA $00		; disable joypad, set NMI and V/H count to 0
+	LDA #$00		; disable joypad, set NMI and V/H count to 0
 	STA $4200
 
 	LDA #%10000000	; turn screen off, activate vblank
@@ -20,15 +20,22 @@ Start:
 	LDA #%00001111	; end vblank, setting brightness to 15
 	STA $2100
 
-	CLI
+	LDA #$80		; enable NMI back
+	STA $4200
+
+	CLI				; enable interrupts
 	STZ $00			; set up RAM space
 	LDA #$00
 
 ; Loop infinitely
--	BRA -
+-
+	STA $00002C
+	STA $00002C
+	STA $00002C
+	BRL -
 
 VBlank:
-	WDM #$00
+	;WDM #$00
 	LDX $00
 	CPX #$01
 	BEQ .decrease

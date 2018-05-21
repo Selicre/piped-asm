@@ -129,7 +129,7 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
                             cursor.seek(SeekFrom::Start(*addr as u64 + 1)).unwrap();
                             match size {
                                 SizeHint::RelByte => cursor.write_i8((offset - addr - 2) as i8).unwrap(),
-                                SizeHint::RelWord => cursor.write_i16::<LittleEndian>((offset - addr - 2) as i16).unwrap(),
+                                SizeHint::RelWord => cursor.write_i16::<LittleEndian>((offset - addr - 3) as i16).unwrap(),
                                 _ => panic!("can't into absolute anonymous labels yet")
                             };
                         }
@@ -153,7 +153,7 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
                         cursor.seek(SeekFrom::Start(*addr as u64 + 1)).unwrap();
                         match size {
                             SizeHint::RelByte => cursor.write_i8((offset - addr - 2) as i8).unwrap(),
-                            SizeHint::RelWord => cursor.write_i16::<LittleEndian>((offset - addr - 2) as i16).unwrap(),
+                            SizeHint::RelWord => cursor.write_i16::<LittleEndian>((offset - addr - 3) as i16).unwrap(),
                             _ => panic!("can't into absolute anonymous labels yet")
                         };
                     }
@@ -182,9 +182,11 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
                         Span::NegLabel(c) => {
                             let label = neg_labels.get(c.data).expect("pls").expect("what");
                             // todo: reduce duplication (same thing is in the linker)
-                            let d = c.replace(label as i32 - chunk.data.len() as i32 - 2);
                             s = s.and_then(instructions::size_hint(&name.as_ident().unwrap().to_uppercase()));
                             s = s.and_then(size.0);
+                            // no clue why this is the case
+                            let offset = s.bytes().unwrap() as i32 + 1;
+                            let d = c.replace(label as i32 - chunk.data.len() as i32 - offset);
                             arg.span = Span::Number(d);
                         },
                         Span::PosLabel(c) => {
@@ -210,7 +212,7 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
                         },
                         _ => s = s.and_then(size.0),
                     }
-                    let arg = AddressingMode::parse(arg, s).map_err(|_| { print!("uhh {:?}", name); panic!() })?;
+                    let arg = AddressingMode::parse(arg, s).map_err(|_| { print!("wrong addressing mode {:?}", name); panic!() })?;
                     
                     SInstruction::new(name.as_ident().unwrap(), arg).write_to(&mut chunk.data).unwrap();
                 },

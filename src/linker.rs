@@ -132,7 +132,7 @@ fn header(entry: u16, nmi: u16) -> LabeledChunk {
     // ROM makeup, type, size (TODO!), SRAM size, creator ID (2 bytes)
         0x23, 0x35, 0x0C, 0x07, 0x01, 0x01,
     // Version #, checksum complement (2 bytes), checksum (2 bytes)
-        0x00, 0x2D, 0x67, 0xD2, 0x98 ])?;
+        0x00, 0xFF, 0xFF, 0x00, 0x00 ])?;
     // interrupt vectors (TODO)
     // NATIVE
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;
@@ -163,36 +163,4 @@ pub fn link<W: Write, I: Iterator<Item=(String,LabeledChunk)>>(writer: W, iter: 
         banks.append(name,block);
     }
     banks.write_to(writer).unwrap();
-    /*
-    // calculate effective PC offsets, this will be moved earlier in the pipeline later
-    let size_offsets = chunks.iter().fold((LinkedHashMap::new(), 0), |mut acc, elt| {
-        println!("{:?}", acc);
-        acc.0.insert(&*elt.0, acc.1);
-        acc.1 += elt.1.data.len();
-        acc
-    }).0;
-    // Fill banks
-
-
-    println!("{:?}",size_offsets);
-    for (k,v) in chunks.iter() {
-        // Cow, maybe? Or some other buffer?
-        let mut c = Cursor::new(v.data.clone());
-        for i in v.label_refs.iter() {
-            c.seek(SeekFrom::Start(i.offset as u64 + 1)).unwrap();
-            let mut val = size_offsets[&i.label] as isize;
-            // TODO: why 2?
-            let rel_offset = |val| val - (size_offsets[&k] + i.offset + 2) as isize;
-            match i.size {
-                SizeHint::Byte => c.write_u8(val as u8),
-                SizeHint::Word => c.write_u16::<LittleEndian>(val as u16),
-                // TODO: figure out banks
-                SizeHint::Long => c.write_u24::<LittleEndian>(val as u32),
-                SizeHint::RelByte => c.write_i8(rel_offset(val) as i8),
-                SizeHint::RelWord => c.write_i16::<LittleEndian>(rel_offset(val) as i16),
-                _ => panic!("linker error lel")
-            }.unwrap();
-        }
-        writer.write(&c.into_inner()).unwrap();
-    }*/
 }
