@@ -3,6 +3,7 @@ Hyper's assembler supreme (probably not actual name)
 # How to run this
 
 Step 1: install [Rust](https://www.rust-lang.org/)
+
 Step 2: `cargo run -- <filename>`
 
 # About
