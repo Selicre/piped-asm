@@ -50,23 +50,9 @@ fn run() -> Result<(),Box<Error>> {
     // Pipeline: chars -> lexer -> (macro expander) -> parser -> compiler -> linker
     let lexed = Lexer::new(filename.clone(), file.chars().map(|c| c.unwrap()));
     let parsed = Parser::new(lexed).map(|c| c.unwrap());
-    let compiled = Compiler::new(parsed);
-    let res = compiled.map(|c| c.unwrap());
+    let compiled = Compiler::new(parsed).map(|c| c.unwrap());
     let mut output = BufWriter::new(File::create("out.sfc")?);
-    linker::link(&mut output, res);
-    /*for l in compiled {
-    
-/*
-        if let Ok((name, chunk)) = l {
-            print!("{} => ",name);
-            for i in &chunk.data {
-                print!("{:02X}",i);
-            }
-            if chunk.label_refs.len() > 0 { print!(", labels: {:?}", chunk.label_refs); }
-            println!();
-        }
-        */
-    }*/
+    linker::link(&mut output, compiled);
     Ok(())
 }
 

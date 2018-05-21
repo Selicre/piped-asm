@@ -351,7 +351,7 @@ impl Instruction {
             "MVP" => move_mem!(0x44),
             // NOPS
             "NOP" => implied!(0xEA),
-            "WDM" => kinds! {           // TODO: fix
+            "WDM" => kinds! {           // TODO: fix (for now, use WDM #00)
                 Implied =>      0x42,
                 Immediate =>    0x42
             },
