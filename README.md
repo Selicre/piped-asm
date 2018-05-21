@@ -1,5 +1,10 @@
 Hyper's assembler supreme (probably not actual name)
 
+# How to run this
+
+Step 1: install [Rust](https://www.rust-lang.org/)
+Step 2: `cargo run -- <filename>`
+
 # About
 
 This is a multi-architecture pluggable assembler written in Rust, primarily targeted at development of Super Mario World hacks.
