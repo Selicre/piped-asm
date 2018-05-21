@@ -99,7 +99,7 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
     fn res_next(&mut self) -> Result<Option<(String, LabeledChunk)>,CompileError> {
         use self::Statement::*;
         let mut chunk = LabeledChunk::default();
-        #[derive(Hash, PartialEq, Eq)]
+        #[derive(Debug, Hash, PartialEq, Eq)]
         enum LabelKind {
             Pos { depth: usize, id: usize },
             Neg { depth: usize, id: usize },
@@ -117,11 +117,31 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
         let mut labels: HashMap<LabelKind, usize> = HashMap::new();
         // all the places where it should be replaced
         let mut labels_used: Vec<(SizeHint, usize, LabelKind)> = Vec::new();
+
+        fn merge_labels(chunk: &mut LabeledChunk, labels: &HashMap<LabelKind, usize>, labels_used: &Vec<(SizeHint, usize, LabelKind)>) {
+            use std::io::{Cursor, Write, Seek, SeekFrom};
+            println!("{:?} => {:?}", labels, labels_used);
+            let mut cursor = Cursor::new(&mut chunk.data);
+            for (size, addr, label) in labels_used.iter() {
+                let offset = labels[label] as isize;
+                // replace the address at i+1 with current
+                cursor.seek(SeekFrom::Start(*addr as u64 + 1)).unwrap();
+                let addr = *addr as isize;
+                match size {
+                    SizeHint::RelByte => cursor.write_i8((offset - addr - 2) as i8).unwrap(),
+                    SizeHint::RelWord => cursor.write_i16::<LittleEndian>((offset - addr - 3) as i16).unwrap(),
+                    _ => panic!("can't into absolute local labels yet, sorry")
+                };
+            }
+        }
         loop {
             let c = if let Some(c) = self.inner.next() { c } else {
                 return match self.next_label.take() {
                     Span::Empty => Ok(None),
-                    Span::Ident(c) => Ok(Some((c.data, chunk))),
+                    Span::Ident(c) => {
+                        merge_labels(&mut chunk, &labels, &labels_used);
+                        Ok(Some((c.data, chunk)))
+                    },
                     _ => unreachable!()
                 };
             };
@@ -129,21 +149,7 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
             match c {
                 // Split here
                 Label { name: mut name @ Span::Ident(_) } => {
-                    {
-                        use std::io::{Cursor, Write, Seek, SeekFrom};
-                        let mut cursor = Cursor::new(&mut chunk.data);
-                        for (size, addr, label) in labels_used.iter() {
-                            let offset = labels[label] as isize;
-                            // replace the address at i+1 with current
-                            cursor.seek(SeekFrom::Start(*addr as u64 + 1)).unwrap();
-                            let addr = *addr as isize;
-                            match size {
-                                SizeHint::RelByte => cursor.write_i8((offset - addr - 2) as i8).unwrap(),
-                                SizeHint::RelWord => cursor.write_i16::<LittleEndian>((offset - addr - 3) as i16).unwrap(),
-                                _ => panic!("can't into absolute local labels yet, sorry")
-                            };
-                        }
-                    }
+                    merge_labels(&mut chunk, &labels, &labels_used);
                     mem::swap(&mut self.next_label, &mut name);
                     let c = if let Span::Ident(c) = name { c } else { unreachable!() };
                     return Ok(Some((c.data, chunk)));
@@ -175,6 +181,7 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
                     // checking)
                     let mut s = SizeHint::Unspecified;
                     match arg.span {
+                        // todo: reorder all of this
                         Span::Ident(c) => {
                             // also cover other variants
                             let d = c.replace(0);
@@ -200,7 +207,7 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
                             labels_used.push((s, chunk.data.len(), LabelKind::Pos { depth, id: pos_labels[depth] }));
                             arg.span = Span::Number(d);
                         },
-                        // This is a local label for now.
+                        // This is a local label for now. This will be redone later
                         ref mut c @ Span::Successive(_) => {
                             let mut d = None;
                             if let Some((depth, label)) = c.is_local_label() {
@@ -212,6 +219,7 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
                                 // todo: range checks
                                 let mut stack = label_stack[..depth].to_vec();
                                 stack.push(label_name);
+                                //println!("stack: {:?}", stack);
                                 labels_used.push((s, chunk.data.len(), LabelKind::Local { stack }));
                             }
                             *c = Span::Number(d.unwrap());
@@ -225,9 +233,7 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
                     //println!("(some attributes, todo: change compiler context)");
                 }
                 c => {
-                    //panic!("i don't wanna eat this")
-                    println!("SKIPPING OVER SOME SHIT");
-                    println!("{:?}", c);
+                    panic!("unknown statement {:?}", c);
                 }
             }
         }

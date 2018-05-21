@@ -33,6 +33,12 @@ pub struct Argument {
     pub span: Span
 }
 
+impl fmt::Display for Argument {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?} ({})", self.kind, self.span)
+    }
+}
+
 
 
 impl Argument {
@@ -42,8 +48,8 @@ impl Argument {
     fn parse(spans: &mut [Span]) -> Result<Self, ParseError> {
         use self::Span::*;
         use self::ArgumentKind::*;
-        //spans.iter().for_each(|s| println!("{}", s));
         let empty = &[Span::Empty][..];
+        //println!("SPANS: {:?}", spans);
         // todo: add expression parsing?
         let (kind, spans) = match spans {
             [] => (Implied, empty),
@@ -62,6 +68,7 @@ impl Argument {
             [Symbol('#',_), ref c..] => (Constant, c),
             [ref c..] => (Direct, c),
         };
+        //println!("ARGUMENT PARSED: {:?}, {:?}", kind, spans);
         // Potentially avoid cloning? Mostly numbers anyway though so
         let span = Span::coagulate(spans);
         Ok(Argument { kind, span })
@@ -89,15 +96,15 @@ pub enum Statement {
         attrs: Vec<Span>
     }
 }
-/*
+
 impl fmt::Display for Statement {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use self::Statement::*;
         match self {
             Label { name } => write!(f, "Label {}", name),
             LocalLabel { depth, name } => write!(f, "Local label {}", name),
-            Instruction { name, size, arg } => write!(f, "Instruction: {}, argument: {:?}", name, arg),
-            Attributes { attrs } => write!(f, "Attributes (unused yet)"),
+            Instruction { name, size, arg } => write!(f, "Instruction: {} {}", name, arg),
+            Attributes { attrs } => write!(f, "Attributes"),
             RawData { data } => {
                 write!(f, "Raw data: ")?;
                 for i in data { write!(f, "{:02X} ", i)? }
@@ -107,7 +114,7 @@ impl fmt::Display for Statement {
         }
     }
 }
-*/
+
 
 #[derive(Debug)]
 pub enum ParseError {

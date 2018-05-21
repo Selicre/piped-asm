@@ -97,6 +97,7 @@ pub fn size_hint(instr: &str/*, context: CompilerContext*/) -> SizeHint {
     use self::SizeHint::*;
     match instr {
         "BPL" | "BMI" | "BVC" | "BVS" | "BRA" | "BCC" | "BNE" | "BCS" | "BEQ" => RelByte,
+        "INC" | "DEC" => Implicit,
         "BRL" => RelWord,
         "JMP" => Word,
         "JML" => Long,

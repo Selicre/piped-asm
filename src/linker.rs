@@ -102,9 +102,6 @@ impl Banks {
                         _ => panic!("linker error lel")
                     }?;
                 }
-                /*print!("{} => ", label);
-                for i in c.get_ref().iter() { print!("{:02X} ", i); }
-                println!();*/
                 bank_contents.write_all(&c.get_ref())?;
             }
             if bank_id == 0 {

@@ -98,14 +98,13 @@ pub struct SpanData<T> {
 }
 impl<T: Display> Display for SpanData<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{} at {}", self.data, self.start)
+        write!(f, "{}", self.data)
     }
 }
 
 impl<T: fmt::UpperHex> fmt::UpperHex for SpanData<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.data.fmt(f)?;
-        write!(f, " at {}", self.start)
+        self.data.fmt(f)
     }
 }
 
@@ -132,48 +131,27 @@ pub enum Span {
     Empty
 }
 
-/*
-#[derive(Debug,Clone)]
-pub enum SpanKind {
-    Ident(String),      // TODO: SmallString?
-    Symbol(char),
-    Byte(u8),
-    Word(u16),
-    Long(u32),
-    AnonLabel(i32),
-    Successive(Vec<SpanKind>),
-    NumberError,        // Pseudotoken for malformed numbers
-    Whitespace,         // For statement separation, compound operator parsing, etc.
-    LineBreak
-}
 
-#[derive(Debug,Clone)]
-pub struct Span {
-    pub kind: SpanKind,
-    pub start: Location,
-    pub length: u32
-}*/
-/*
 impl Display for Span {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use self::Span::*;
         match self {
-            Ident(ref s) => write!(f, "ident {}", s),
-            Symbol(_, ref s) => write!(f, "symbol {}", s),
-            Number(ref s) => write!(f, "number {}", s),
-            Byte(ref s) => write!(f, "byte ${:02X}", s),
-            Word(ref s) => write!(f, "word ${:04X}", s),
-            Long(ref s) => write!(f, "long ${:06X}", s),
-            PosLabel(ref s) => write!(f, "positive anonymous label (depth {})", s),
-            NegLabel(ref s) => write!(f, "negative anonymous label (depth {})", s),
-            Successive(ref _s) => write!(f, "several spans"),   // TODO
+            Ident(ref s) => write!(f, "{}", s),
+            Symbol(_, ref s) => write!(f, "{}", s),
+            Number(ref s) => write!(f, "{}", s),
+            Byte(ref s) => write!(f, "${:02X}", s),
+            Word(ref s) => write!(f, "${:04X}", s),
+            Long(ref s) => write!(f, "${:06X}", s),
+            PosLabel(ref s) => write!(f, "+({})", s),
+            NegLabel(ref s) => write!(f, "-({})", s),
+            Successive(ref s) => { for i in s { write!(f, "{}", i)? } Ok(()) },
             NumberError(_) => write!(f, "malformed number"),
-            Whitespace => write!(f, "whitespace"),
-            LineBreak => write!(f, "line break"),
-            Empty => write!(f, "empty span"),
+            Whitespace => write!(f, " "),
+            LineBreak => write!(f, " "),
+            Empty => write!(f, "<empty>"),
         }
     }
-}*/
+}
 
 impl Span {
     pub fn as_ident(&self) -> Option<&str> {

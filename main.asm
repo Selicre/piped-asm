@@ -66,9 +66,10 @@ OtherCode:
 .otherLocal:
 ..b:
 ..c:
-	BRA ..b
+	BRA .localLabel
 	DEC
 	BEQ ..c
+	BPL ..b
 	ADC #$10
 	RTS
 
