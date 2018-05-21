@@ -99,14 +99,24 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
     fn res_next(&mut self) -> Result<Option<(String, LabeledChunk)>,CompileError> {
         use self::Statement::*;
         let mut chunk = LabeledChunk::default();
-        // Most of the time you're not gonna end up with anonymous labels of depth 10000, so if you
-        // run out of memory, that is your fault
+        #[derive(Hash, PartialEq, Eq)]
+        enum LabelKind {
+            Pos { depth: usize, id: usize },
+            Neg { depth: usize, id: usize },
+            Local { stack: Vec<String> },
+        }
         // You can't jump to an anonymous label across a non-local label because that prevents
         // reordering
-        let mut pos_labels: Vec<Vec<(SizeHint, usize)>> = Vec::new();
+        // An array of IDs for each level
+        let mut pos_labels = Vec::new();
+        // For negative labels, id 0 is invalid
         let mut neg_labels = Vec::new();
-        let mut labels = HashMap::new();
-        let mut labels_used: Vec<(SizeHint, usize, Span)> = Vec::new();
+        // Current local label stack.
+        let mut label_stack = Vec::new();
+        // label name -> offset
+        let mut labels: HashMap<LabelKind, usize> = HashMap::new();
+        // all the places where it should be replaced
+        let mut labels_used: Vec<(SizeHint, usize, LabelKind)> = Vec::new();
         loop {
             let c = if let Some(c) = self.inner.next() { c } else {
                 return match self.next_label.take() {
@@ -120,17 +130,17 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
                 // Split here
                 Label { name: mut name @ Span::Ident(_) } => {
                     {
-                        // merge all local labels (todo: extract this into a diff function)
                         use std::io::{Cursor, Write, Seek, SeekFrom};
                         let mut cursor = Cursor::new(&mut chunk.data);
-                        for (size, addr, name) in labels_used.iter() {
-                            let offset = labels[name.as_ident().unwrap()];
+                        for (size, addr, label) in labels_used.iter() {
+                            let offset = labels[label] as isize;
                             // replace the address at i+1 with current
                             cursor.seek(SeekFrom::Start(*addr as u64 + 1)).unwrap();
+                            let addr = *addr as isize;
                             match size {
                                 SizeHint::RelByte => cursor.write_i8((offset - addr - 2) as i8).unwrap(),
                                 SizeHint::RelWord => cursor.write_i16::<LittleEndian>((offset - addr - 3) as i16).unwrap(),
-                                _ => panic!("can't into absolute anonymous labels yet")
+                                _ => panic!("can't into absolute local labels yet, sorry")
                             };
                         }
                     }
@@ -140,27 +150,21 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
                 },
                 Label { name: Span::NegLabel(c) } => {
                     let c = c.data;
-                    if neg_labels.len() < c+1 { neg_labels.resize(c+1, None); }
-                    neg_labels[c] = Some(chunk.data.len())
+                    if neg_labels.len() < c+1 { neg_labels.resize(c+1, 0); }
+                    neg_labels[c] += 1;
+                    labels.insert(LabelKind::Neg { depth: c, id: neg_labels[c] }, chunk.data.len());
                 },
                 Label { name: Span::PosLabel(c) } => {
-                    use std::io::{Cursor, Write, Seek, SeekFrom};
-                    let offset = chunk.data.len();
-                    let mut cursor = Cursor::new(&mut chunk.data);
                     let c = c.data;
-                    for (size, addr) in pos_labels.get(c).map(|c| c.iter()).into_iter().flatten() {
-                        // replace the address at i+1 with current
-                        cursor.seek(SeekFrom::Start(*addr as u64 + 1)).unwrap();
-                        match size {
-                            SizeHint::RelByte => cursor.write_i8((offset - addr - 2) as i8).unwrap(),
-                            SizeHint::RelWord => cursor.write_i16::<LittleEndian>((offset - addr - 3) as i16).unwrap(),
-                            _ => panic!("can't into absolute anonymous labels yet")
-                        };
-                    }
+                    if pos_labels.len() < c+1 { pos_labels.resize(c+1, 0); }
+                    neg_labels[c] += 1;
+                    labels.insert(LabelKind::Pos { depth: c, id: neg_labels[c] }, chunk.data.len());
                 },
-                LocalLabel { depth: _, name: Span::Ident(c) } => {
-                    // todo: reset depth
-                    labels.insert(c.data, chunk.data.len());
+                LocalLabel { depth, name: Span::Ident(c) } => {
+                    // trim the stack
+                    label_stack.resize(depth, "(anonymous)".to_string());
+                    label_stack.push(c.data);
+                    labels.insert(LabelKind::Local { stack: label_stack.clone() }, chunk.data.len());
                 },
                 RawData { data } => {
                     use std::io::Write;
@@ -180,21 +184,20 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
                             arg.span = Span::Number(d);
                         },
                         Span::NegLabel(c) => {
-                            let label = neg_labels.get(c.data).expect("pls").expect("what");
-                            // todo: reduce duplication (same thing is in the linker)
+                            let depth = c.data;
+                            let d = c.replace(0);
+                            if neg_labels.len() < depth+1 { neg_labels.resize(depth+1, 0); }
                             s = s.and_then(instructions::size_hint(&name.as_ident().unwrap().to_uppercase()));
                             s = s.and_then(size.0);
-                            // no clue why this is the case
-                            let offset = s.bytes().unwrap() as i32 + 1;
-                            let d = c.replace(label as i32 - chunk.data.len() as i32 - offset);
+                            labels_used.push((s, chunk.data.len(), LabelKind::Neg { depth, id: neg_labels[depth] }));
                             arg.span = Span::Number(d);
                         },
                         Span::PosLabel(c) => {
-                            if pos_labels.len() < c.data+1 { pos_labels.resize(c.data+1, Vec::new()); }
+                            let depth = c.data;
                             let d = c.replace(0);
                             s = s.and_then(instructions::size_hint(&name.as_ident().unwrap().to_uppercase()));
                             s = s.and_then(size.0);
-                            pos_labels[c.data].push((s, chunk.data.len()));
+                            labels_used.push((s, chunk.data.len(), LabelKind::Pos { depth, id: pos_labels[depth] }));
                             arg.span = Span::Number(d);
                         },
                         // This is a local label for now.
@@ -202,18 +205,20 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
                             let mut d = None;
                             if let Some((depth, label)) = c.is_local_label() {
                                 let l = if let Span::Ident(l) = label { l } else { panic!() };
+                                let label_name = l.data.clone();
                                 d = Some(l.replace(0));
                                 s = s.and_then(instructions::size_hint(&name.as_ident().unwrap().to_uppercase()));
                                 s = s.and_then(size.0);
-                                if depth > 1 { panic!("too deep b"); }
-                                labels_used.push((s, chunk.data.len(), label.clone()));
+                                // todo: range checks
+                                let mut stack = label_stack[..depth].to_vec();
+                                stack.push(label_name);
+                                labels_used.push((s, chunk.data.len(), LabelKind::Local { stack }));
                             }
                             *c = Span::Number(d.unwrap());
                         },
                         _ => s = s.and_then(size.0),
                     }
                     let arg = AddressingMode::parse(arg, s).map_err(|_| { print!("wrong addressing mode {:?}", name); panic!() })?;
-                    
                     SInstruction::new(name.as_ident().unwrap(), arg).write_to(&mut chunk.data).unwrap();
                 },
                 Attributes { .. } => {

@@ -199,7 +199,7 @@ impl Span {
         if let Span::Successive(c) = self {
             if let [ref dots.., ref span @ Span::Ident(_)] = &**c {
                 if dots.iter().all(|c| if let Span::Symbol('.',_) = c { true } else { false }) {
-                    return Some((dots.len(), span))
+                    return Some((dots.len() - 1, span))
                 }
             }
         }

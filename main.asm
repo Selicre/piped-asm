@@ -64,7 +64,11 @@ OtherCode:
 	BPL .otherLocal
 	BRA .localLabel
 .otherLocal:
+..b:
+..c:
+	BRA ..b
 	DEC
+	BEQ ..c
 	ADC #$10
 	RTS
 

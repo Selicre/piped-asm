@@ -74,7 +74,7 @@ pub enum Statement {
         name: Span
     },
     LocalLabel {
-        depth: u8,
+        depth: usize,
         name: Span
     },
     Instruction {
@@ -171,12 +171,12 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
             return Ok(Some(match &mut **buf {
                 // Label:
                 [ref mut name @ Ident(_), Symbol(':',_)] |
-                [ref mut name @ PosLabel(_)] | [ref mut name @ NegLabel(_)]=>
+                [ref mut name @ PosLabel(_)] | [ref mut name @ NegLabel(_)] =>
                     Label { name: name.take() },
-                // TODO: local labels
-                [Symbol('.',_), ref mut name @ Ident(_), Symbol(':',_)] => {
-                    LocalLabel { depth: 1, name: name.take() }
-                }
+                // closure below is a workaround
+                [ref mut dots.., ref mut name @ Ident(_), Symbol(':',_)]
+                    if (|| dots.iter().all(|c| if let Symbol('.',_) = c { true } else { false }))() =>
+                        LocalLabel { depth: dots.len() - 1, name: name.take() },
                 [Ident(ref c), ref rest.., LineBreak] if c.data == "db" => RawData {
                     data: {
                         let mut dbuf = Vec::new();
