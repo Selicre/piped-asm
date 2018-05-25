@@ -96,7 +96,11 @@ impl Banks {
                         SizeHint::Byte => c.write_u8(val as u8),
                         SizeHint::Word => c.write_u16::<LittleEndian>(val as u16 + 0x8000),
                         // TODO: figure out banks
-                        SizeHint::Long => c.write_u24::<LittleEndian>(val as u32 + 0x8000),
+                        SizeHint::Long => {
+                            // also todo: calculate this based on lorom/hirom/etc.
+                            c.write_u16::<LittleEndian>(val as u16 + 0x8000)?;
+                            c.write_u8(bank)
+                        },
                         SizeHint::RelByte => c.write_i8(rel_offset(val) as i8),
                         SizeHint::RelWord => c.write_i16::<LittleEndian>(rel_offset(val) as i16),
                         _ => panic!("linker error lel")
@@ -129,10 +133,11 @@ fn header(entry: u16, nmi: u16) -> LabeledChunk {
     // 21 bytes:       ---------------------
     chunk.data.write_all(b"SUPER MARIOWORLD     ")?;
     chunk.data.write_all(&[
-    // ROM makeup, type, size (TODO!), SRAM size, creator ID (2 bytes)
-        0x23, 0x35, 0x0C, 0x07, 0x01, 0x01,
-    // Version #, checksum complement (2 bytes), checksum (2 bytes)
-        0x00, 0xFF, 0xFF, 0x00, 0x00 ])?;
+    // ROM makeup, type, size (TODO!), SRAM size, destination code
+        0x23, 0x00, 0x0C, 0x07, 0x01, 0x33 ])?;
+    chunk.data.write_u8(0x00)?;                      // Version
+    chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // ROM checksum complement stub
+    chunk.data.write_u16::<LittleEndian>(0x0000)?;   // ROM checksum stub
     // interrupt vectors (TODO)
     // NATIVE
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;

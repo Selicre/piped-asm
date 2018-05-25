@@ -99,8 +99,8 @@ pub fn size_hint(instr: &str/*, context: CompilerContext*/) -> SizeHint {
         "BPL" | "BMI" | "BVC" | "BVS" | "BRA" | "BCC" | "BNE" | "BCS" | "BEQ" => RelByte,
         "INC" | "DEC" => Implicit,
         "BRL" => RelWord,
-        "JMP" => Word,
-        "JML" => Long,
+        "JMP" | "JSR" => Word,
+        "JML" | "JSL" => Long,
         _ => Unspecified
     }
 }
@@ -123,6 +123,11 @@ impl Instruction {
                 arg.write_to(w).map_err(CompileError::WriteError)?;
             }}
         }
+        macro_rules! write_block_move {
+            ($opcode:expr, $b1:expr, $b2:expr) => {{
+                w.write_all(&[$opcode, $b1, $b2]).map_err(CompileError::WriteError)?;
+            }}
+        }
         macro_rules! kinds {
             (Implied => $im:expr) => { match arg { Implied => write!($im), _ => return Err(CompileError::AddressMode) } };
 
@@ -130,7 +135,7 @@ impl Instruction {
             ($($p:ident => $e:expr),*) => { match arg { $($p(_) => write!($e)),*, _ => return Err(CompileError::AddressMode) } };
         }
         macro_rules! move_mem {
-            ($e:expr) => { match arg { BlockMove(_,_) => write!($e), _ => return Err(CompileError::AddressMode) } }
+            ($e:expr) => { match arg { BlockMove(b1,b2) => write_block_move!($e, *b1, *b2), _ => return Err(CompileError::AddressMode) } }
         }
         macro_rules! implied {
             ($e:expr) => { kinds! { Implied => $e } }

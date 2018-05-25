@@ -120,7 +120,7 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
 
         fn merge_labels(chunk: &mut LabeledChunk, labels: &HashMap<LabelKind, usize>, labels_used: &Vec<(SizeHint, usize, LabelKind)>) {
             use std::io::{Cursor, Write, Seek, SeekFrom};
-            println!("{:?} => {:?}", labels, labels_used);
+            //println!("{:?} => {:?}", labels, labels_used);
             let mut cursor = Cursor::new(&mut chunk.data);
             for (size, addr, label) in labels_used.iter() {
                 let offset = labels[label] as isize;
@@ -130,7 +130,19 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
                 match size {
                     SizeHint::RelByte => cursor.write_i8((offset - addr - 2) as i8).unwrap(),
                     SizeHint::RelWord => cursor.write_i16::<LittleEndian>((offset - addr - 3) as i16).unwrap(),
-                    _ => panic!("can't into absolute local labels yet, sorry")
+                    SizeHint::Byte => {
+                        cursor.write_u8(0).unwrap();
+                        //println!("can't into absolute local labels yet, sorry")
+                    },
+                    SizeHint::Word => {
+                        cursor.write_u16::<LittleEndian>(0).unwrap();
+                        //println!("can't into absolute local labels yet, sorry")
+                    },
+                    SizeHint::Long => {
+                        cursor.write_u24::<LittleEndian>(0).unwrap();
+                        //println!("can't into absolute local labels yet, sorry")
+                    },
+                    _ => panic!("uh")
                 };
             }
         }
@@ -163,8 +175,8 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
                 Label { name: Span::PosLabel(c) } => {
                     let c = c.data;
                     if pos_labels.len() < c+1 { pos_labels.resize(c+1, 0); }
-                    neg_labels[c] += 1;
-                    labels.insert(LabelKind::Pos { depth: c, id: neg_labels[c] }, chunk.data.len());
+                    pos_labels[c] += 1;
+                    labels.insert(LabelKind::Pos { depth: c, id: pos_labels[c] }, chunk.data.len());
                 },
                 LocalLabel { depth, name: Span::Ident(c) } => {
                     // trim the stack
@@ -202,9 +214,10 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
                         Span::PosLabel(c) => {
                             let depth = c.data;
                             let d = c.replace(0);
+                            if pos_labels.len() < depth+1 { pos_labels.resize(depth+1, 0); }
                             s = s.and_then(instructions::size_hint(&name.as_ident().unwrap().to_uppercase()));
                             s = s.and_then(size.0);
-                            labels_used.push((s, chunk.data.len(), LabelKind::Pos { depth, id: pos_labels[depth] }));
+                            labels_used.push((s, chunk.data.len(), LabelKind::Pos { depth, id: pos_labels[depth] + 1 }));
                             arg.span = Span::Number(d);
                         },
                         // This is a local label for now. This will be redone later
@@ -222,7 +235,10 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
                                 //println!("stack: {:?}", stack);
                                 labels_used.push((s, chunk.data.len(), LabelKind::Local { stack }));
                             }
-                            *c = Span::Number(d.unwrap());
+                            *c = Span::Number(match d {
+                                Some(c) => c,
+                                None => panic!("uh can't do anything with {}", c)//return Ok(Some(("expr_error".to_string(), LabeledChunk::default())))
+                            }); // temporary
                         },
                         _ => s = s.and_then(size.0),
                     }

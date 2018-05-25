@@ -60,7 +60,9 @@ impl AddressingMode {
         use self::AddressingMode::*;
         use self::ArgumentKind::*;
         use self::SizeHint::*;
-
+        if let TwoArgs(Span::Byte(c1), Span::Byte(c2)) = arg.kind {
+            return Ok(BlockMove(c1.data as u8, c2.data as u8));
+        }
         let (val,mut h) = match arg.span {
             Span::Empty => return Ok(AddressingMode::Implied),
             Span::Byte(c) => (c.data, Byte),
@@ -70,7 +72,6 @@ impl AddressingMode {
             c => panic!("compiler broke: invalid span given to addr mode parser: {:?}",c)
         };
         h = h.and_then(hint);
-
         Ok(match (arg.kind,h) {
             (Constant,Byte) => Immediate(val as u8),
             (Constant,Word) => ImmediateWord(val as u16),
@@ -93,10 +94,12 @@ impl AddressingMode {
             (IndLong,Word) => AbsIndLong(val as u16),
             (Direct,Long) => AbsLong(val as u32),
             (IndexedX,Long) => AbsLongX(val as u32),
-            (TwoArgs(Span::Byte(c1),Span::Byte(c2)),_) => BlockMove(c1.data as u8, c2.data as u8),
 
             (Direct,RelByte) => Relative(val as i8),
             (Direct,RelWord) => RelativeWord(val as i16),
+
+            (Direct,Implicit) => AddressingMode::Implied,       // todo: fix by checking INC A
+
             (c,v) => { println!("{:?} and {:?}", c, v); return Err(AddrModeError) }
         })
     }

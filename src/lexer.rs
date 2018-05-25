@@ -3,7 +3,7 @@ use std::ops;
 use std::rc::Rc;
 use std::fmt::{self, Display};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Location {
     line: u32,
     column: u32,
@@ -90,7 +90,7 @@ pub struct LexerInner<I>(LocationTracker<I>);
 
 // TODO: invert the structure for easier matching
 
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,PartialEq)]
 pub struct SpanData<T> {
     pub data: T,
     pub start: Location,
@@ -114,7 +114,7 @@ impl<T> SpanData<T> {
     }
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,PartialEq)]
 pub enum Span {
     Ident(SpanData<String>),
     Symbol(char, SpanData<char>),   // way easier matching
@@ -124,6 +124,7 @@ pub enum Span {
     Long(SpanData<i32>),
     PosLabel(SpanData<usize>),
     NegLabel(SpanData<usize>),
+    String(SpanData<String>),
     Successive(Vec<Span>),
     NumberError(SpanData<()>),
     Whitespace,
@@ -144,6 +145,7 @@ impl Display for Span {
             Long(ref s) => write!(f, "${:06X}", s),
             PosLabel(ref s) => write!(f, "+({})", s),
             NegLabel(ref s) => write!(f, "-({})", s),
+            String(ref s) => write!(f, "\"{}\"", s),
             Successive(ref s) => { for i in s { write!(f, "{}", i)? } Ok(()) },
             NumberError(_) => write!(f, "malformed number"),
             Whitespace => write!(f, " "),
@@ -219,8 +221,20 @@ impl Span {
     pub fn neg_label(data: usize, length: u32, start: Location) -> Self {
         Span::NegLabel(SpanData { data, start, length })
     }
+    pub fn character(data: i32, length: u32, start: Location) -> Self {
+        Span::Number(SpanData { data, start, length })
+    }
+    pub fn string(data: String, length: u32, start: Location) -> Self {
+        Span::String(SpanData { data, start, length })
+    }
     pub fn is_whitespace(&self) -> bool {
         if let Span::Whitespace | Span::LineBreak = self { true } else { false }
+    }
+    pub fn is_symbol(&self, s: char) -> bool {
+        if let Span::Symbol(c,_) = self { *c == s } else { false }
+    }
+    pub fn is_ident(&self, s: &str) -> bool {
+        if let Span::Ident(c) = self { c.data == s } else { false }
     }
 }
 
@@ -232,9 +246,9 @@ impl<R: Iterator<Item=char>> Iterator for LexerInner<R> {
         let iter = &mut self.0;
         let start = iter.location();
         match iter.peek()? {
-            'a' ... 'z' | 'A' ... 'Z' => { // ident
+            'a' ... 'z' | 'A' ... 'Z' | '_' => { // ident
                 let mut buf = String::new();
-                while let 'a'...'z' | 'A' ... 'Z' | '0' ... '9' = iter.peek()? {
+                while let 'a'...'z' | 'A' ... 'Z' | '0' ... '9' | '_' = iter.peek()? {
                     buf.push(iter.next()?);
                 }
                 Some(Span::ident(buf, iter.length(&start), start))
@@ -318,22 +332,51 @@ impl<R: Iterator<Item=char>> Iterator for LexerInner<R> {
                     iter.next();
                 }
             },
-            /*';' => {        // comment
-                loop {
-                    match iter.peek()? {
-                        '\n' => return Some(Span::line_break(start)),
-                        _ => { iter.next(); },
-                    }
+            // ascii char
+            '\'' => {
+                let _ = iter.next()?;
+                let ch = match iter.next()? {
+                    '\\' => match iter.next()? {
+                        '\'' => '\'',
+                        '\\' => '\\',
+                        '"' => '"',
+                        'n' => '\n',
+                        'r' => '\r',
+                        't' => '\t',
+                        _ => panic!("invalid escape")
+                    },
+                    '\n' => panic!("Lexer error (todo: handle)"),
+                    c => c
+                } as u32;
+                if iter.next()? != '\'' { panic!("char too long"); }
+                if ch > 0x7F {
+                    panic!("Can't handle unicode chars yet");
                 }
+                Some(Span::character(ch as i32, iter.length(&start), start))
             },
-            ' ' | '\t' => {  // whitespace
-                while let ' ' | '\t' = iter.peek()? { iter.next(); }
-                Some(Span::whitespace(start))
+            // ascii string
+            '\"' => {
+                let _ = iter.next()?;
+                let mut buf = String::new();
+                loop {
+                    buf.push(match iter.next()? {
+                        '\\' => match iter.next()? {
+                            '\'' => '\'',
+                            '\\' => '\\',
+                            '"' => '"',
+                            'n' => '\n',
+                            'r' => '\r',
+                            't' => '\t',
+                            _ => panic!("invalid escape")
+                        },
+                        '\n' => panic!("Lexer error (todo: handle)"),
+                        '"' => break,
+                        c => c,
+                        //None => panic!("Lexer error (todo: handle)")
+                    });
+                }
+                Some(Span::string(buf, iter.length(&start), start))
             },
-            '\n' => {
-                while let '\n' = iter.peek()? { iter.next(); }
-                Some(Span::line_break(start))
-            },*/
             // other stuff
             _ => Some(Span::symbol(iter.next()?, start))
         }

@@ -10,7 +10,7 @@ use instructions::SizeHint;
 
 use byteorder::{WriteBytesExt,LittleEndian};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum ArgumentKind {
     Implied,
     Constant,
@@ -45,32 +45,102 @@ impl Argument {
     fn implied() -> Self {
         Argument { kind: ArgumentKind::Implied, span: Span::Empty }
     }
-    fn parse(spans: &mut [Span]) -> Result<Self, ParseError> {
+    fn parse(spans: &[Span]) -> Result<Self, ParseError> {
         use self::Span::*;
         use self::ArgumentKind::*;
         let empty = &[Span::Empty][..];
-        //println!("SPANS: {:?}", spans);
-        // todo: add expression parsing?
-        let (kind, spans) = match spans {
-            [] => (Implied, empty),
-            [ref c.., Symbol(',',_), Ident(ref x)] if x.data == "x" => (IndexedX, c),
-            [ref c.., Symbol(',',_), Ident(ref y)] if y.data == "y" => (IndexedY, c),
-            [Symbol('(',_), ref c.., Symbol(',',_), Ident(ref x), Symbol(')',_)] if x.data == "x" => (IndX, c),
-            [Symbol('(',_), ref c.., Symbol(')',_), Symbol(',',_), Ident(ref y)] if y.data == "y" => (IndY, c),
-            [Symbol('[',_), ref c.., Symbol(']',_)] => (IndLong, c),
-            [Symbol('[',_), ref c.., Symbol(']',_), Symbol(',',_), Ident(ref y)] if y.data == "y" => (IndLongY, c),
-            [ref c.., Symbol(',',_), Ident(ref s)] if s.data == "s" => (Stack, c),
-            [Symbol('(',_), ref c.., Symbol(',',_), Ident(ref s), Symbol(')',_), Symbol(',',_), Ident(ref y)] if s.data == "s" && y.data == "y" => (StackY, c),
-            [Symbol('(',_), ref c.., Symbol(')',_)] => (Indirect, c),
-            // TODO: properly fix block syntax
-            [Symbol('#',_), ref c1, Symbol(',',_), Symbol('#',_), ref c2] => (TwoArgs(c1.clone(), c2.clone()), empty),
-            [ref c1, Symbol(',',_), ref c2] => (TwoArgs(c1.clone(), c2.clone()), empty),
-            [Symbol('#',_), ref c..] => (Constant, c),
-            [ref c..] => (Direct, c),
+        #[derive(Clone, Copy)]
+        enum ExprMod {
+            XSuffix,
+            YSuffix,
+            SSuffix,
+            Parens,
+            Brackets
+        }
+        // USE THIS WITH INSANE CAUTION.
+        unsafe fn break_free<'a, 'b, T>(a: &'a mut [T]) -> &'b mut [T] {
+            let s = &mut a[..] as *mut [T];
+            &mut *s
+        }
+        // todo: put into a macro, this is seriously stupid
+        fn x_suf(sp: &[Span]) -> Option<&[Span]> {    // ,x
+            let len = sp.len();
+            let (rest,s) = sp.split_at(len-2);
+            if (s[1].is_ident("x") || s[1].is_ident("X")) && s[0].is_symbol(',') {
+                Some(rest)
+            } else { None }
+        }
+        fn y_suf(sp: &[Span]) -> Option<&[Span]> {    // ,y
+            let len = sp.len();
+            let (rest,s) = sp.split_at(len-2);
+            if (s[1].is_ident("y") || s[1].is_ident("Y")) && s[0].is_symbol(',') {
+                Some(rest)
+            } else { None }
+        }
+        fn s_suf(sp: &[Span]) -> Option<&[Span]> {    // ,s
+            let len = sp.len();
+            let (rest,s) = sp.split_at(len-2);
+            if (s[1].is_ident("s") || s[1].is_ident("S")) && s[0].is_symbol(',') {
+                Some(rest)
+            } else { None }
         };
-        //println!("ARGUMENT PARSED: {:?}, {:?}", kind, spans);
-        // Potentially avoid cloning? Mostly numbers anyway though so
-        let span = Span::coagulate(spans);
+        fn parens(sp: &[Span]) -> Option<&[Span]> {
+            let len = sp.len();
+            if sp[0].is_symbol('(') && sp[len-1].is_symbol(')') {
+                Some(&sp[1..len-1])
+            } else { None }
+        }
+        fn brackets(sp: &[Span]) -> Option<&[Span]> {
+            let len = sp.len();
+            if sp[0].is_symbol('[') && sp[len-1].is_symbol(']') {
+                Some(&sp[1..len-1])
+            } else { None }
+        }
+
+        macro_rules! modeparser {
+            ($spans:ident => [$default:expr, $($fn:ident => $t:tt),*]) => {{
+                if $spans.len() < 3 {
+                    ($default, $spans)
+                } $( else if let Some(c) = $fn($spans) {
+                    modeparser!(c => $t)
+                } )* else {
+                    ($default, $spans)
+                }
+            }};
+            ($spans:ident => $expr:expr) => { ($expr, $spans) };
+        }
+        let (mut kind, spans) = modeparser! [ spans => [
+            Direct,
+            x_suf => IndexedX,
+            y_suf => [
+                IndexedY,
+                parens => [
+                    IndY,
+                    s_suf => StackY
+                ],
+                brackets => IndLongY
+            ],
+            s_suf => Stack,
+            parens => [
+                Indirect,
+                x_suf => IndX
+            ],
+            brackets => IndLong
+        ]];
+        // TODO: full support for expressions
+        match spans {
+            [Symbol('#',_), ref c1, Symbol(',',_), Symbol('#',_), ref c2] |
+            [ref c1, Symbol(',',_), ref c2] => {
+                return Ok(Argument { kind: TwoArgs(c1.clone(), c2.clone()), span: Span::Empty });
+            },
+            _ => {}
+        }
+        let span = if kind == Direct && spans.len() >= 2 && spans[0].is_symbol('#') {
+            kind = Constant;
+            Span::coagulate(&spans[1..])
+        } else {
+            Span::coagulate(spans)
+        };
         Ok(Argument { kind, span })
     }
 }
@@ -94,7 +164,8 @@ pub enum Statement {
     },
     Attributes {
         attrs: Vec<Span>
-    }
+    },
+    Error(ParseError)
 }
 
 impl fmt::Display for Statement {
@@ -119,6 +190,7 @@ impl fmt::Display for Statement {
 #[derive(Debug)]
 pub enum ParseError {
     UnknownSpan,
+    UnknownCommand(Vec<Span>),
     InvalidOpSize(Span),
     GenericSyntaxError,
     UnknownAddressingMode(Span),
@@ -181,10 +253,12 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                 [ref mut name @ PosLabel(_)] | [ref mut name @ NegLabel(_)] =>
                     Label { name: name.take() },
                 // closure below is a workaround
+                [ref mut dots.., ref mut name @ Ident(_), Whitespace] |
+                [ref mut dots.., ref mut name @ Ident(_), LineBreak] |
                 [ref mut dots.., ref mut name @ Ident(_), Symbol(':',_)]
-                    if (|| dots.iter().all(|c| if let Symbol('.',_) = c { true } else { false }))() =>
+                    if (|| dots.len() > 0 && dots.iter().all(|c| if let Symbol('.',_) = c { true } else { false }))() =>
                         LocalLabel { depth: dots.len() - 1, name: name.take() },
-                [Ident(ref c), ref rest.., LineBreak] if c.data == "db" => RawData {
+                [Ident(ref c), ref rest.., LineBreak] if c.data == "db" || c.data == "dw" || c.data == "dl" => RawData {
                     data: {
                         let mut dbuf = Vec::new();
                         let mut allow_comma = false;
@@ -196,6 +270,10 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                                 Byte(c) => { allow_comma = true; dbuf.write_u8(c.data as u8).unwrap(); },
                                 Word(c) => { allow_comma = true; dbuf.write_u16::<LittleEndian>(c.data as u16).unwrap(); },
                                 Long(c) => { allow_comma = true; dbuf.write_u24::<LittleEndian>(c.data as u32).unwrap(); },
+                                // todo: make this work based on db/dw/dl
+                                Number(c) => { allow_comma = true; dbuf.write_u8(c.data as u8).unwrap(); },
+                                String(c) => { allow_comma = true; dbuf.write(c.data.as_bytes()).unwrap(); },
+                                Ident(c) => { /* TODO: labels */ },
                                 c => return Err(ParseError::UnexpectedSymbol(c.clone()))
                             }
                         }
@@ -225,7 +303,7 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                     attrs: rest.to_vec()
                 },
                 [Whitespace] | [LineBreak] => { clear = true; continue; },
-                [.., LineBreak] => return Err(ParseError::GenericSyntaxError),
+                [ref line.., LineBreak] => return Err(ParseError::UnknownCommand(line.to_vec())),
                 _ => continue
             }));
         })();

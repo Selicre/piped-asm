@@ -29,39 +29,69 @@ Start:
 
 ; Loop infinitely
 -
-	STA $00002C
-	STA $00002C
-	STA $00002C
+	STA $7E002C
+	STA $7E002C
+	STA $7E002C
 	BRL -
 
+SomeStuff:
+	INC
+	JSR LabelTest
+
 VBlank:
+	BRA .type1
+.type0:
 	;WDM #$00
 	LDX $00
 	CPX #$01
-	BEQ .decrease
-.increase:
+	BEQ ..decrease
+..increase:
 	INC
 	CMP #$0F
-	BNE .end
+	BNE ..end
 	LDX #$01
 	STX $00
-.decrease:
+	BNE ..end
+..decrease:
 	DEC
 	CMP #$00
-	BNE .end
+	BNE ..end
 	LDX #$00
 	STX $00
-.end:
+..end:
 	;AND #$0F
 	STA $2100
+	BRA .end
+.type1:
+	LDX $00
+	CPX #$01
+	BEQ +
+	INC
+	CMP #$0F
+	BNE ++
+	LDX #$01
+	STX $00
+	BNE ++
++
+	DEC
+	CMP #$00
+	BNE ++
+	LDX #$00
+	STX $00
+++
+	;AND #$0F
+	STA $2100
+.end
 	RTI
 
 
-OtherCode:
+LabelTest:
 .localLabel:
 	INC
+..c:
 	CMP #10
 	BPL .otherLocal
+	BCC ..c
 	BRA .localLabel
 .otherLocal:
 ..b:
@@ -73,3 +103,28 @@ OtherCode:
 	ADC #$10
 	RTS
 
+db $FF,$FF,$FF,$FF
+db 'n','i','c','e', 0
+db "even nicer", 0
+
+ArgumentSizeTest:
+	ORA ($10,x)
+	ORA $32,s
+	ORA $10
+	ORA [$10]
+	ORA #$54
+	ORA $9876
+	ORA $7EDBCA
+	ORA ($10),y
+	ORA ($10)
+	ORA ($34,s),y
+	ORA $10,x
+	ORA [$10],y
+	ORA $9876,y
+	ORA $9876,x
+	ORA $7EDCBA,x
+
+; TODO
+MoveBlockTest:
+	MVP $10,$20
+	MVN $20,$10
