@@ -1,10 +1,14 @@
 // Stuff to help compilation
 use std::collections::HashMap;
 use std::mem;
+use std::error::Error;
 
-use lexer::Span;
+use std::rc::Rc;
+use std::cell::RefCell;
 
-use parser::{Statement};
+use lexer::{Lexer,Span};
+
+use parser::{Parser,Statement};
 use instructions;
 use instructions::Instruction as SInstruction;
 use instructions::SizeHint;
@@ -15,6 +19,7 @@ use byteorder::LittleEndian;
 use std::io::Write;
 use byteorder::WriteBytesExt;
 
+use expression::{Expression,ExprNode,LocalLabelState};
 
 struct CompilerContext {
     local: CtxInner,
@@ -60,7 +65,8 @@ pub struct LabelRef {
 #[derive(Default, Debug)]
 pub struct LabeledChunk {
     pub data: Vec<u8>,
-    pub label_refs: Vec<LabelRef>,
+    //pub label_refs: Vec<LabelRef>,
+    pub pending_exprs: Vec<(usize, Expression)>,
     // todo: internal absolute refs (e.g. JMP +)
     pub bank_hint: Option<u8>
 }
@@ -69,7 +75,7 @@ impl LabeledChunk {
     pub fn padding(len: usize, bank_hint: Option<u8>) -> Self {
         Self {
             data: vec![0; len],
-            label_refs: vec![],
+            pending_exprs: vec![],
             bank_hint
         }
     }
@@ -79,22 +85,54 @@ impl LabeledChunk {
     pub fn get_data(&self) -> &[u8] {
         &*self.data
     }
-    pub fn label_refs(&self) -> &Vec<LabelRef> {
+    /*pub fn label_refs(&self) -> &Vec<LabelRef> {
         &self.label_refs
-    }
+    }*/
     pub fn size(&self) -> usize {
         self.data.len()
     }
 }
 
-pub struct Compiler<I> {
-    inner: I,
+#[derive(Debug,Default)]
+pub struct CompilerStateInner {
+    pub lls: LocalLabelState
+}
+
+#[derive(Debug,Clone,Default)]
+pub struct CompilerState(Rc<RefCell<CompilerStateInner>>);
+
+/*impl CompilerState {
+    pub fn lls(&self) -> &mut LocalLabelState {
+        &mut self.0.borrow_mut().lls
+    }
+}*/
+
+impl ::std::ops::Deref for CompilerState {
+    type Target = Rc<RefCell<CompilerStateInner>>;
+    fn deref(&self) -> &Rc<RefCell<CompilerStateInner>> {
+        &self.0
+    }
+}
+
+pub struct Compiler {
+    state: CompilerState,
+    // fix?
+    inner: Box<Iterator<Item=Statement>>,
     next_label: Span
 }
 
-impl<I: Iterator<Item=Statement>> Compiler<I> {
-    pub fn new(inner: I) -> Self {
-        Self { inner, next_label: Span::ident("*root".to_string(), 0, Default::default()) }
+impl Compiler {
+    pub fn new(filename: &str) -> Result<Self,Box<Error>> {
+        use std::io::{self,prelude::*};
+        use std::fs::File;
+        let state = CompilerState::default();
+        let file = match filename {
+            "-" => Box::new(io::stdin()) as Box<Read>,
+            c => Box::new(File::open(filename)?)
+        };
+        let lexed = Lexer::new(filename.to_string(), file.chars().map(|c| c.unwrap()));
+        let inner = Box::new(Parser::new(lexed, state.clone()).map(|c| c.unwrap()));
+        Ok(Self { inner, state, next_label: Span::ident("*root".to_string(), 0, Default::default()) })
     }
     fn res_next(&mut self) -> Result<Option<(String, LabeledChunk)>,CompileError> {
         use self::Statement::*;
@@ -105,24 +143,52 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
             Neg { depth: usize, id: usize },
             Local { stack: Vec<String> },
         }
-        // You can't jump to an anonymous label across a non-local label because that prevents
-        // reordering
-        // An array of IDs for each level
-        let mut pos_labels = Vec::new();
-        // For negative labels, id 0 is invalid
-        let mut neg_labels = Vec::new();
-        // Current local label stack.
-        let mut label_stack = Vec::new();
         // label name -> offset
-        let mut labels: HashMap<LabelKind, usize> = HashMap::new();
+        let mut labels: HashMap<ExprNode, usize> = HashMap::new();
         // all the places where it should be replaced
-        let mut labels_used: Vec<(SizeHint, usize, LabelKind)> = Vec::new();
+        let mut pending_exprs: Vec<(usize, Expression)> = Vec::new();
 
-        fn merge_labels(chunk: &mut LabeledChunk, labels: &HashMap<LabelKind, usize>, labels_used: &Vec<(SizeHint, usize, LabelKind)>) {
+        fn merge_labels(chunk: &mut LabeledChunk, labels: &HashMap<ExprNode, usize>, pending_exprs: Vec<(usize, Expression)>) {
             use std::io::{Cursor, Write, Seek, SeekFrom};
             //println!("{:?} => {:?}", labels, labels_used);
             let mut cursor = Cursor::new(&mut chunk.data);
-            for (size, addr, label) in labels_used.iter() {
+            let mut linker_exprs = Vec::new();
+            for (offset, mut expr) in pending_exprs.into_iter() {
+                use self::ExprNode::*;
+                expr.each_mut(|c| {
+                    println!("{:?}\n----\n{:?}", labels, c);
+                    *c = ExprNode::LabelOffset(match labels.get(c) {
+                        Some(&c) => c as isize,
+                        None => return
+                    });
+                });
+                expr.reduce();
+                println!("Size of {:?}: {:?}", expr.root, expr.size);
+                match expr.root {
+                    ExprNode::Empty => {},
+                    ExprNode::Constant(c) => {
+                        cursor.seek(SeekFrom::Start(offset as u64)).unwrap();
+                        match expr.size {
+                            SizeHint::RelByte | SizeHint::RelWord => panic!("This doesn't make any sense."),
+                            SizeHint::Byte => cursor.write_u8(c as u8).unwrap(),
+                            SizeHint::Word => cursor.write_u16::<LittleEndian>(c as u16).unwrap(),
+                            SizeHint::Long => cursor.write_u24::<LittleEndian>(c as u32).unwrap(),
+                            _ => panic!("Weird size?")
+                        }
+                    },
+                    ExprNode::LabelOffset(c) => {
+                        cursor.seek(SeekFrom::Start(offset as u64)).unwrap();
+                        match expr.size {
+                            SizeHint::RelByte => cursor.write_i8((c as i32 - offset as i32 - 1) as i8).unwrap(),
+                            SizeHint::RelWord => cursor.write_i16::<LittleEndian>((c as i32 - offset as i32 - 1) as i16).unwrap(),
+                            s => linker_exprs.push((offset, expr)),
+                        }
+                    },
+                    _ => linker_exprs.push((offset, expr))
+                }
+            }
+            chunk.pending_exprs = linker_exprs;
+            /*for (size, addr, label) in labels_used.iter() {
                 let offset = labels[label] as isize;
                 // replace the address at i+1 with current
                 cursor.seek(SeekFrom::Start(*addr as u64 + 1)).unwrap();
@@ -144,14 +210,14 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
                     },
                     _ => panic!("uh")
                 };
-            }
+            }*/
         }
         loop {
             let c = if let Some(c) = self.inner.next() { c } else {
                 return match self.next_label.take() {
                     Span::Empty => Ok(None),
                     Span::Ident(c) => {
-                        merge_labels(&mut chunk, &labels, &labels_used);
+                        merge_labels(&mut chunk, &labels, pending_exprs);
                         Ok(Some((c.data, chunk)))
                     },
                     _ => unreachable!()
@@ -161,88 +227,50 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
             match c {
                 // Split here
                 Label { name: mut name @ Span::Ident(_) } => {
-                    merge_labels(&mut chunk, &labels, &labels_used);
+                    merge_labels(&mut chunk, &labels, pending_exprs);
                     mem::swap(&mut self.next_label, &mut name);
                     let c = if let Span::Ident(c) = name { c } else { unreachable!() };
                     return Ok(Some((c.data, chunk)));
                 },
                 Label { name: Span::NegLabel(c) } => {
                     let c = c.data;
-                    if neg_labels.len() < c+1 { neg_labels.resize(c+1, 0); }
-                    neg_labels[c] += 1;
-                    labels.insert(LabelKind::Neg { depth: c, id: neg_labels[c] }, chunk.data.len());
+                    let label = self.state.borrow_mut().lls.incr_neg_id(c);
+                    labels.insert(label, chunk.data.len());
                 },
                 Label { name: Span::PosLabel(c) } => {
                     let c = c.data;
-                    if pos_labels.len() < c+1 { pos_labels.resize(c+1, 0); }
-                    pos_labels[c] += 1;
-                    labels.insert(LabelKind::Pos { depth: c, id: pos_labels[c] }, chunk.data.len());
+                    let label = self.state.borrow_mut().lls.incr_pos_id(c);
+                    labels.insert(label, chunk.data.len());
                 },
                 LocalLabel { depth, name: Span::Ident(c) } => {
-                    // trim the stack
-                    label_stack.resize(depth, "(anonymous)".to_string());
-                    label_stack.push(c.data);
-                    labels.insert(LabelKind::Local { stack: label_stack.clone() }, chunk.data.len());
+                    let s = self.state.borrow_mut().lls.push_local(depth, c.data);
+                    labels.insert(s, chunk.data.len());
                 },
                 RawData { data } => {
                     use std::io::Write;
                     chunk.data.write(&data).unwrap();
                 },
-                Instruction { name, size, mut arg } => {
+                Instruction { name, size, arg } => {
                     // TODO: check for modification of compiler context (e.g. static size
                     // checking)
-                    let mut s = SizeHint::Unspecified;
-                    match arg.span {
-                        // todo: reorder all of this
-                        Span::Ident(c) => {
-                            // also cover other variants
-                            let d = c.replace(0);
-                            s = s.and_then(instructions::size_hint(&name.as_ident().unwrap().to_uppercase()));
-                            s = s.and_then(size.0);
-                            chunk.label_refs.push(LabelRef { offset: chunk.data.len(), size: s, label: c.data });
-                            arg.span = Span::Number(d);
-                        },
-                        Span::NegLabel(c) => {
-                            let depth = c.data;
-                            let d = c.replace(0);
-                            if neg_labels.len() < depth+1 { neg_labels.resize(depth+1, 0); }
-                            s = s.and_then(instructions::size_hint(&name.as_ident().unwrap().to_uppercase()));
-                            s = s.and_then(size.0);
-                            labels_used.push((s, chunk.data.len(), LabelKind::Neg { depth, id: neg_labels[depth] }));
-                            arg.span = Span::Number(d);
-                        },
-                        Span::PosLabel(c) => {
-                            let depth = c.data;
-                            let d = c.replace(0);
-                            if pos_labels.len() < depth+1 { pos_labels.resize(depth+1, 0); }
-                            s = s.and_then(instructions::size_hint(&name.as_ident().unwrap().to_uppercase()));
-                            s = s.and_then(size.0);
-                            labels_used.push((s, chunk.data.len(), LabelKind::Pos { depth, id: pos_labels[depth] + 1 }));
-                            arg.span = Span::Number(d);
-                        },
-                        // This is a local label for now. This will be redone later
-                        ref mut c @ Span::Successive(_) => {
-                            let mut d = None;
-                            if let Some((depth, label)) = c.is_local_label() {
-                                let l = if let Span::Ident(l) = label { l } else { panic!() };
-                                let label_name = l.data.clone();
-                                d = Some(l.replace(0));
-                                s = s.and_then(instructions::size_hint(&name.as_ident().unwrap().to_uppercase()));
-                                s = s.and_then(size.0);
-                                // todo: range checks
-                                let mut stack = label_stack[..depth].to_vec();
-                                stack.push(label_name);
-                                //println!("stack: {:?}", stack);
-                                labels_used.push((s, chunk.data.len(), LabelKind::Local { stack }));
-                            }
-                            *c = Span::Number(match d {
-                                Some(c) => c,
-                                None => panic!("uh can't do anything with {}", c)//return Ok(Some(("expr_error".to_string(), LabeledChunk::default())))
-                            }); // temporary
-                        },
-                        _ => s = s.and_then(size.0),
+                    use self::ExprNode::*;
+                    println!("PARSING: {:?}", name);
+                    let mut const_only = true;
+                    arg.expr.each(|c| match c {
+                        Constant(_) => {},
+                        Empty => {},
+                        _ => const_only = false
+                    });
+                    let s = instructions::size_hint(&name.as_ident().unwrap().to_uppercase())
+                        .and_then(arg.expr.size)
+                        .and_then(size.0);
+                    if !const_only {
+                        let mut new_expr = arg.expr.clone();
+                        new_expr.size = s;
+                        pending_exprs.push((chunk.data.len()+1, new_expr));
                     }
                     let arg = AddressingMode::parse(arg, s).map_err(|_| { print!("wrong addressing mode {:?}", name); panic!() })?;
+                    //println!("{} {:?}", name, arg);
                     SInstruction::new(name.as_ident().unwrap(), arg).write_to(&mut chunk.data).unwrap();
                 },
                 Attributes { .. } => {
@@ -256,7 +284,7 @@ impl<I: Iterator<Item=Statement>> Compiler<I> {
     }
 }
 
-impl<I: Iterator<Item=Statement>> Iterator for Compiler<I> {
+impl Iterator for Compiler {
     type Item = Result<(String, LabeledChunk),CompileError>;
     fn next(&mut self) -> Option<Self::Item> {
         match self.res_next() {

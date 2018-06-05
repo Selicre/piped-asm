@@ -3,6 +3,8 @@ use std::ops;
 use std::rc::Rc;
 use std::fmt::{self, Display};
 
+use instructions::SizeHint;
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Location {
     line: u32,
@@ -149,7 +151,7 @@ impl Display for Span {
             Successive(ref s) => { for i in s { write!(f, "{}", i)? } Ok(()) },
             NumberError(_) => write!(f, "malformed number"),
             Whitespace => write!(f, " "),
-            LineBreak => write!(f, " "),
+            LineBreak => write!(f, "\\n"),
             Empty => write!(f, "<empty>"),
         }
     }
@@ -184,6 +186,15 @@ impl Span {
             }
         }
         None
+    }
+    pub fn size(&self) -> SizeHint {
+        use self::Span::*;
+        match self {
+            Byte(_) => SizeHint::Byte,
+            Word(_) => SizeHint::Word,
+            Long(_) => SizeHint::Long,
+            _ => SizeHint::Unspecified
+        }
     }
     pub fn coagulate(entries: &[Span]) -> Span {
         if entries.len() == 0 { Span::Empty }
@@ -248,7 +259,7 @@ impl<R: Iterator<Item=char>> Iterator for LexerInner<R> {
         match iter.peek()? {
             'a' ... 'z' | 'A' ... 'Z' | '_' => { // ident
                 let mut buf = String::new();
-                while let 'a'...'z' | 'A' ... 'Z' | '0' ... '9' | '_' = iter.peek()? {
+                while let Some('a'...'z') | Some('A' ... 'Z') | Some('0' ... '9') | Some('_') = iter.peek() {
                     buf.push(iter.next()?);
                 }
                 Some(Span::ident(buf, iter.length(&start), start))

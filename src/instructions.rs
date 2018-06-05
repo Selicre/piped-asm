@@ -71,6 +71,18 @@ impl SizeHint {
             c => c
         }
     }
+    pub fn max(self, other: Self) -> Self {
+        use self::SizeHint::*;
+        let out = match (self, other) {
+            (c, Unspecified) => c,
+            (Word, Byte) => Byte,
+            (Long, _) => Long,
+            (_, c) => c,
+            //_ => panic!(".max() got context-dependant size!")
+        };
+        //println!("{:?} + {:?} = {:?}", self, other, out);
+        out
+    }
     /*
     // TODO: context-dependant shit
     pub fn apply(&self, arg: &mut Argument) {
@@ -85,6 +97,7 @@ impl SizeHint {
 
     }*/
     pub fn and_then(self, other: SizeHint) -> SizeHint {
+        println!("{:?} => {:?}", self, other);
         match other {
             SizeHint::Unspecified => self,
             c => c

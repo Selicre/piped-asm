@@ -22,6 +22,8 @@ use compiler::LabeledChunk;
 
 use instructions::SizeHint;
 
+use expression::ExprNode;
+
 // Anything that isn't directly bank data (lorom mode, etc.), also TODO
 struct BankContext {
     
@@ -38,6 +40,7 @@ struct Bank {
 impl Bank {
     fn append(&mut self, label: String, chunk: LabeledChunk) -> Option<usize> {
         let size = chunk.size();
+        println!("{}: ${:04X}", label, self.size);
         self.chunks.insert(label, (self.size, chunk));
         self.size += size;
         Some(self.size)
@@ -80,12 +83,36 @@ impl Banks {
         // lorom only, again
         self.content[bank as usize].size = 0x8000;
     }
-    fn write_to<W: Write>(&self, mut w: W) -> Result<(), Box<Error>> {
-        for (bank_id, bank) in self.content.iter().enumerate() {
+    fn write_to<W: Write>(&mut self, mut w: W) -> Result<(), Box<Error>> {
+        let refs = &self.refs;
+        for (ref bank_id, ref mut bank) in self.content.iter_mut().enumerate() {
             let mut bank_contents = Vec::with_capacity(0x8000);
-            for (label, (offset, chunk)) in bank.chunks.iter() {
+            for (label, (offset, chunk)) in bank.chunks.iter_mut() {
                 let mut c = Cursor::new(chunk.data.clone());    // Cow?
-                for i in chunk.label_refs() {
+                for (expr_offset,expr) in chunk.pending_exprs.iter_mut() {
+                    let abs_offset = *offset + *expr_offset;
+                    expr.each_mut(|c| {
+                        use expression::ExprNode::*;
+                        match c {
+                            Label(d) => *c = ExprNode::Constant({let (b,c) = refs[d]; (b as i32)*0x10000+0x8000 + c as i32}),
+                            LabelOffset(d) => *c = ExprNode::Constant((abs_offset as i32)+(*d as i32)),
+                            _ => {}
+                        }
+                    });
+                    expr.reduce();
+                    let mut val = if let ExprNode::Constant(c) = expr.root { c } else { panic!("Can't collapse expression {}", expr.root) };
+                    println!("Reduced expression to {:04X} (offset: {:X}, expr_offset: {:X})", val, offset, expr_offset);
+                    c.seek(SeekFrom::Start(*expr_offset as u64)).unwrap();
+                    match expr.size {
+                        SizeHint::Byte => c.write_u8(val as u8).unwrap(),
+                        SizeHint::Word => c.write_u16::<LittleEndian>(val as u16).unwrap(),
+                        SizeHint::Long => c.write_u24::<LittleEndian>(val as u32).unwrap(),
+                        SizeHint::RelByte => c.write_i8((val - abs_offset as i32 - 1) as i8).unwrap(),
+                        SizeHint::RelWord => c.write_i16::<LittleEndian>((val - abs_offset as i32 - 1) as i16).unwrap(),
+                        c => panic!("oh no what is this size {:?}", c)
+                    }
+                }
+                /*for i in panic!() { //chunk.label_refs() {
                     // todo: remove panic
                     let (bank, val) = self.refs[&i.label];
                     let mut val = val as isize;
@@ -105,15 +132,17 @@ impl Banks {
                         SizeHint::RelWord => c.write_i16::<LittleEndian>(rel_offset(val) as i16),
                         _ => panic!("linker error lel")
                     }?;
-                }
+                }*/
                 bank_contents.write_all(&c.get_ref())?;
             }
-            if bank_id == 0 {
+            if *bank_id == 0 {
                 let (b, start) = self.refs["Start"];
                 if b != 0 { Err("bank for Start not 0")?; }
                 let (b, nmi) = self.refs["VBlank"];
                 if b != 0 { Err("bank for VBlank not 0")?; }
-                let h = header(start as u16, nmi as u16);
+                let (b, irq) = self.refs.get("IRQ").unwrap_or(&(0, 0x7FFF)).clone();
+                if b != 0 { Err("bank for IRQ not 0")?; }
+                let h = header(start as u16, nmi as u16, irq as u16);
                 bank_contents.resize(0x7FC0, 0x00);
                 bank_contents.extend_from_slice(&h.data);
             } else {
@@ -125,7 +154,7 @@ impl Banks {
     }
 }
 
-fn header(entry: u16, nmi: u16) -> LabeledChunk {
+fn header(entry: u16, nmi: u16, irq: u16) -> LabeledChunk {
     ((|| {
     let mut chunk = LabeledChunk::default();
     // LOROM only, for now
@@ -147,7 +176,7 @@ fn header(entry: u16, nmi: u16) -> LabeledChunk {
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // ABORT
     chunk.data.write_u16::<LittleEndian>(nmi + 0x8000)?;      // NMI
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // RESET (unused)
-    chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // IRQ
+    chunk.data.write_u16::<LittleEndian>(irq + 0x8000)?;   // IRQ
     // EMULATION
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;

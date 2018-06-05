@@ -4,7 +4,9 @@ use byteorder::LittleEndian;
 use std::io::Write;
 use byteorder::WriteBytesExt;
 use std::io;
-use instructions::SizeHint;
+use instructions::{self,SizeHint};
+use expression::ExprNode;
+
 #[derive(Debug)]
 pub enum AddressingMode {
     Implied,
@@ -63,15 +65,18 @@ impl AddressingMode {
         if let TwoArgs(Span::Byte(c1), Span::Byte(c2)) = arg.kind {
             return Ok(BlockMove(c1.data as u8, c2.data as u8));
         }
-        let (val,mut h) = match arg.span {
-            Span::Empty => return Ok(AddressingMode::Implied),
-            Span::Byte(c) => (c.data, Byte),
-            Span::Word(c) => (c.data, Word),
-            Span::Long(c) => (c.data, Long),
-            Span::Number(c) => (c.data, Byte),
-            c => panic!("compiler broke: invalid span given to addr mode parser: {:?}",c)
+        let mut h = arg.expr.size;
+        let mut label_is_a = false;
+        let val = match *arg.expr {
+            ExprNode::Constant(val) => val,
+            ExprNode::Label(ref c) if &*c == "A" || &*c == "a" => {
+                label_is_a = true;
+                0
+            }
+            _ => 0
         };
         h = h.and_then(hint);
+        h = Byte.and_then(h);
         Ok(match (arg.kind,h) {
             (Constant,Byte) => Immediate(val as u8),
             (Constant,Word) => ImmediateWord(val as u16),
@@ -98,7 +103,8 @@ impl AddressingMode {
             (Direct,RelByte) => Relative(val as i8),
             (Direct,RelWord) => RelativeWord(val as i16),
 
-            (Direct,Implicit) => AddressingMode::Implied,       // todo: fix by checking INC A
+            (Direct,Implicit) if label_is_a => AddressingMode::Implied,
+            (ArgumentKind::Implied,_) => AddressingMode::Implied,
 
             (c,v) => { println!("{:?} and {:?}", c, v); return Err(AddrModeError) }
         })

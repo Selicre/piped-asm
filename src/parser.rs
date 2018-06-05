@@ -8,6 +8,10 @@ use lexer::{Span,SpanData};
 
 use instructions::SizeHint;
 
+use expression::{Expression,ExprNode,ExprError};
+
+use compiler::CompilerState;
+
 use byteorder::{WriteBytesExt,LittleEndian};
 
 #[derive(Debug, PartialEq)]
@@ -30,12 +34,12 @@ pub enum ArgumentKind {
 #[derive(Debug)]
 pub struct Argument {
     pub kind: ArgumentKind,
-    pub span: Span
+    pub expr: Expression
 }
 
 impl fmt::Display for Argument {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?} ({})", self.kind, self.span)
+        write!(f, "{:?} ({})", self.kind, self.expr)
     }
 }
 
@@ -43,25 +47,11 @@ impl fmt::Display for Argument {
 
 impl Argument {
     fn implied() -> Self {
-        Argument { kind: ArgumentKind::Implied, span: Span::Empty }
+        Argument { kind: ArgumentKind::Implied, expr: Expression::empty() }
     }
-    fn parse(spans: &[Span]) -> Result<Self, ParseError> {
+    fn parse(spans: &[Span], state: &CompilerState) -> Result<Self, ParseError> {
         use self::Span::*;
         use self::ArgumentKind::*;
-        let empty = &[Span::Empty][..];
-        #[derive(Clone, Copy)]
-        enum ExprMod {
-            XSuffix,
-            YSuffix,
-            SSuffix,
-            Parens,
-            Brackets
-        }
-        // USE THIS WITH INSANE CAUTION.
-        unsafe fn break_free<'a, 'b, T>(a: &'a mut [T]) -> &'b mut [T] {
-            let s = &mut a[..] as *mut [T];
-            &mut *s
-        }
         // todo: put into a macro, this is seriously stupid
         fn x_suf(sp: &[Span]) -> Option<&[Span]> {    // ,x
             let len = sp.len();
@@ -131,17 +121,17 @@ impl Argument {
         match spans {
             [Symbol('#',_), ref c1, Symbol(',',_), Symbol('#',_), ref c2] |
             [ref c1, Symbol(',',_), ref c2] => {
-                return Ok(Argument { kind: TwoArgs(c1.clone(), c2.clone()), span: Span::Empty });
+                return Ok(Argument { kind: TwoArgs(c1.clone(), c2.clone()), expr: Expression::empty() });
             },
             _ => {}
         }
-        let span = if kind == Direct && spans.len() >= 2 && spans[0].is_symbol('#') {
+        let expr = if kind == Direct && spans.len() >= 2 && spans[0].is_symbol('#') {
             kind = Constant;
-            Span::coagulate(&spans[1..])
+            Expression::parse(&spans[1..], &mut state.borrow_mut().lls).map_err(ParseError::ExprError)?
         } else {
-            Span::coagulate(spans)
+            Expression::parse(spans, &mut state.borrow_mut().lls).map_err(ParseError::ExprError)?
         };
-        Ok(Argument { kind, span })
+        Ok(Argument { kind, expr })
     }
 }
 
@@ -190,10 +180,12 @@ impl fmt::Display for Statement {
 #[derive(Debug)]
 pub enum ParseError {
     UnknownSpan,
+    ExprError(ExprError),
     UnknownCommand(Vec<Span>),
     InvalidOpSize(Span),
     GenericSyntaxError,
     UnknownAddressingMode(Span),
+    IO(io::Error),
     UnexpectedSymbol(Span)
 }
 
@@ -218,11 +210,12 @@ impl<'a,T> ops::DerefMut for QueueClearHandle<'a,T> {
 
 pub struct Parser<S> {
     iter: S,
+    state: CompilerState,
     buf: Vec<Span>
 }
 impl<S: Iterator<Item=Span>> Parser<S> {
-    pub fn new(iter: S) -> Self {
-        Self { iter, buf: Default::default() }
+    pub fn new(iter: S, state: CompilerState) -> Self {
+        Self { iter, state, buf: Default::default() }
     }
 }
 impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
@@ -232,6 +225,7 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
         use self::Statement::*;
         let mut buf = QueueClearHandle(&mut self.buf);
         let iter = &mut self.iter;
+        let state = &self.state;
         let mut clear = false;
         let res = (|| loop {
             if clear {
@@ -258,11 +252,21 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                 [ref mut dots.., ref mut name @ Ident(_), Symbol(':',_)]
                     if (|| dots.len() > 0 && dots.iter().all(|c| if let Symbol('.',_) = c { true } else { false }))() =>
                         LocalLabel { depth: dots.len() - 1, name: name.take() },
+                [Ident(ref c), Whitespace, Span::String(ref name), LineBreak] if c.data == "incbin" => RawData {
+                    data: {
+                        use std::fs::File;
+                        use std::io::Read;
+                        let mut c = Vec::new();
+                        File::open(&name.data).map_err(ParseError::IO)?.read_to_end(&mut c).map_err(ParseError::IO)?;
+                        c
+                    }
+                },
                 [Ident(ref c), ref rest.., LineBreak] if c.data == "db" || c.data == "dw" || c.data == "dl" => RawData {
                     data: {
                         let mut dbuf = Vec::new();
                         let mut allow_comma = false;
                         // Allow any kind unless annotated as strict? TODO: local or global config based on attrs
+                        // todo: expr parsing
                         for c in rest.iter() {
                             match c {
                                 Whitespace => {},
@@ -284,20 +288,20 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                 [ref mut name @ Ident(_), Whitespace, Symbol(':',_)] => Instruction {
                     name: name.take(),
                     size: Default::default(),
-                    arg: Argument::parse(&mut []).unwrap()
+                    arg: Argument::implied()
                 },
                 [ref mut name @ Ident(_), Whitespace, ref mut rest.., LineBreak] |
                 [ref mut name @ Ident(_), Whitespace, ref mut rest.., Whitespace, Symbol(':',_)] => Instruction {
                     name: name.take(),
                     size: Default::default(),
-                    arg: Argument::parse(rest)?
+                    arg: Argument::parse(rest, state)?
                 },
                 [ref mut name @ Ident(_), Symbol('.',_), ref mut size @ Ident(_), Whitespace, ref mut rest.., LineBreak] |
                 [ref mut name @ Ident(_), Symbol('.',_), ref mut size @ Ident(_), Whitespace, ref mut rest.., Whitespace, Symbol(':',_)]
                     => Instruction {
                     name: name.take(),
                     size: (SizeHint::parse(size.as_ident().unwrap()).ok_or(ParseError::GenericSyntaxError)?, Some(size.take())),
-                    arg: Argument::parse(rest)?
+                    arg: Argument::parse(rest, state)?
                 },
                 [Symbol('#',_), Symbol('[',_), ref rest.., Symbol(']',_)] => Attributes {
                     attrs: rest.to_vec()

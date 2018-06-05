@@ -1,9 +1,9 @@
 // A small compiler for the 65816 CPU architecture that also supports patches
-#![feature(io, if_while_or_patterns, type_ascription, slice_patterns, iterator_flatten)]
+#![feature(io, if_while_or_patterns, type_ascription, slice_patterns, iterator_flatten, try_trait)]
 
 // while development happens - don't wanna miss the important warns
 
-#![allow(unused_imports, dead_code, unused_variables)]
+#![allow(unused_imports, dead_code, unused_variables, unreachable_code)]
 
 extern crate byteorder;
 extern crate linked_hash_map;
@@ -39,18 +39,14 @@ use compiler::Compiler;
 
 mod linker;
 
+mod expression;
+
 fn run() -> Result<(),Box<Error>> {
     let args = env::args().collect::<Vec<_>>();
     // TODO: arg parsing
     let filename = args.get(1).ok_or("arguments pls")?;
-    let file = match &**filename {
-        "-" => Box::new(io::stdin()) as Box<Read>,
-        c => Box::new(File::open(filename)?)
-    };
     // Pipeline: chars -> lexer -> (macro expander) -> parser -> compiler -> linker
-    let lexed = Lexer::new(filename.clone(), file.chars().map(|c| c.unwrap()));
-    let parsed = Parser::new(lexed).map(|c| c.unwrap());
-    let compiled = Compiler::new(parsed).map(|c| c.unwrap());
+    let compiled = Compiler::new(filename)?.map(|c| c.unwrap());
     let mut output = BufWriter::new(File::create("out.sfc")?);
     linker::link(&mut output, compiled);
     Ok(())
