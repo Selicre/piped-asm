@@ -1,4 +1,4 @@
-Hyper's assembler supreme (probably not actual name)
+PIPE assembler
 
 # How to run this
 
