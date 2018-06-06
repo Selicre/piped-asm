@@ -65,19 +65,19 @@ impl AddressingMode {
         if let TwoArgs(Span::Byte(c1), Span::Byte(c2)) = arg.kind {
             return Ok(BlockMove(c1.data as u8, c2.data as u8));
         }
-        let mut h = arg.expr.size;
         let mut label_is_a = false;
         let val = match *arg.expr {
             ExprNode::Constant(val) => val,
             ExprNode::Label(ref c) if &*c == "A" || &*c == "a" => {
                 label_is_a = true;
+                //println!("label A");
                 0
             }
             _ => 0
         };
-        h = h.and_then(hint);
-        h = Byte.and_then(h);
+        let h = Byte.and_then(hint);
         Ok(match (arg.kind,h) {
+            (Direct,_) if label_is_a => AddressingMode::Implied,
             (Constant,Byte) => Immediate(val as u8),
             (Constant,Word) => ImmediateWord(val as u16),
             (Direct,Byte) => DirectPage(val as u8),
@@ -103,7 +103,6 @@ impl AddressingMode {
             (Direct,RelByte) => Relative(val as i8),
             (Direct,RelWord) => RelativeWord(val as i16),
 
-            (Direct,Implicit) if label_is_a => AddressingMode::Implied,
             (ArgumentKind::Implied,_) => AddressingMode::Implied,
 
             (c,v) => { println!("{:?} and {:?}", c, v); return Err(AddrModeError) }

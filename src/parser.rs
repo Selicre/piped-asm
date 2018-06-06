@@ -151,6 +151,7 @@ pub enum Statement {
     },
     RawData {
         data: Vec<u8>,
+        pending_exprs: Vec<(usize,Expression)>
     },
     Attributes {
         attrs: Vec<Span>
@@ -166,7 +167,7 @@ impl fmt::Display for Statement {
             LocalLabel { depth, name } => write!(f, "Local label {}", name),
             Instruction { name, size, arg } => write!(f, "Instruction: {} {}", name, arg),
             Attributes { attrs } => write!(f, "Attributes"),
-            RawData { data } => {
+            RawData { data, .. } => {
                 write!(f, "Raw data: ")?;
                 for i in data { write!(f, "{:02X} ", i)? }
                 Ok(())
@@ -181,6 +182,7 @@ impl fmt::Display for Statement {
 pub enum ParseError {
     UnknownSpan,
     ExprError(ExprError),
+    MalformedHexString(Span),
     UnknownCommand(Vec<Span>),
     InvalidOpSize(Span),
     GenericSyntaxError,
@@ -210,22 +212,31 @@ impl<'a,T> ops::DerefMut for QueueClearHandle<'a,T> {
 
 pub struct Parser<S> {
     iter: S,
+    // todo: do this properly
+    incsrc: Option<Box<Iterator<Item=Result<Statement,ParseError>>>>,
     state: CompilerState,
     buf: Vec<Span>
 }
 impl<S: Iterator<Item=Span>> Parser<S> {
     pub fn new(iter: S, state: CompilerState) -> Self {
-        Self { iter, state, buf: Default::default() }
+        Self { iter, state, incsrc: None, buf: Default::default() }
     }
 }
 impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
     type Item = Result<Statement,ParseError>;
     fn next(&mut self) -> Option<Result<Statement,ParseError>> {
+        if let Some(mut c) = self.incsrc.take() {
+            match c.next() {
+                Some(d) => { self.incsrc = Some(c); return Some(d) },
+                None => { self.incsrc = None }
+            }
+        }
         use self::Span::*;
         use self::Statement::*;
         let mut buf = QueueClearHandle(&mut self.buf);
         let iter = &mut self.iter;
         let state = &self.state;
+        let incsrc = &mut self.incsrc;
         let mut clear = false;
         let res = (|| loop {
             if clear {
@@ -241,6 +252,7 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                 }
             };
             buf.push(c);
+            // TODO: this entire thing should be replaced with a proper parser tree.
             return Ok(Some(match &mut **buf {
                 // Label:
                 [ref mut name @ Ident(_), Symbol(':',_)] |
@@ -252,6 +264,24 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                 [ref mut dots.., ref mut name @ Ident(_), Symbol(':',_)]
                     if (|| dots.len() > 0 && dots.iter().all(|c| if let Symbol('.',_) = c { true } else { false }))() =>
                         LocalLabel { depth: dots.len() - 1, name: name.take() },
+                [Ident(ref mut c), Whitespace, Span::String(ref mut filename), LineBreak] if c.data == "incsrc" => {
+                    use std::io::{self,prelude::*,BufReader};
+                    use std::fs::File;
+                    use lexer::Lexer;
+                    let state = state.clone();
+                    let file = File::open(&filename.data).map_err(ParseError::IO)?;
+                    let file = BufReader::new(file);
+                    // no idea why a box is needed here
+                    let chars = file.chars().map(|c| c.unwrap());
+                    let lexed = Box::new(Lexer::new(filename.data.clone(), chars)) as Box<Iterator<Item=_>>;
+                    let mut parsed = Box::new(Parser::new(lexed, state));
+                    let first_stmt = parsed.next();
+                    *incsrc = Some(parsed);
+                    match first_stmt {
+                        Some(c) => c?,
+                        None => { clear = true; continue }
+                    }
+                },
                 [Ident(ref c), Whitespace, Span::String(ref name), LineBreak] if c.data == "incbin" => RawData {
                     data: {
                         use std::fs::File;
@@ -259,29 +289,51 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                         let mut c = Vec::new();
                         File::open(&name.data).map_err(ParseError::IO)?.read_to_end(&mut c).map_err(ParseError::IO)?;
                         c
-                    }
+                    },
+                    pending_exprs: vec![]
                 },
-                [Ident(ref c), ref rest.., LineBreak] if c.data == "db" || c.data == "dw" || c.data == "dl" => RawData {
+                [Ident(ref c), Whitespace, String(ref s), LineBreak] if c.data == "ds" => RawData {
+                    data: s.data.as_bytes().to_vec(),
+                    pending_exprs: vec![]
+                },
+                [Ident(ref c), Whitespace, String(ref s), LineBreak] if c.data == "dbx" => RawData {
                     data: {
-                        let mut dbuf = Vec::new();
-                        let mut allow_comma = false;
-                        // Allow any kind unless annotated as strict? TODO: local or global config based on attrs
-                        // todo: expr parsing
-                        for c in rest.iter() {
-                            match c {
-                                Whitespace => {},
-                                Symbol(',',_) if allow_comma => allow_comma = false,
-                                Byte(c) => { allow_comma = true; dbuf.write_u8(c.data as u8).unwrap(); },
-                                Word(c) => { allow_comma = true; dbuf.write_u16::<LittleEndian>(c.data as u16).unwrap(); },
-                                Long(c) => { allow_comma = true; dbuf.write_u24::<LittleEndian>(c.data as u32).unwrap(); },
-                                // todo: make this work based on db/dw/dl
-                                Number(c) => { allow_comma = true; dbuf.write_u8(c.data as u8).unwrap(); },
-                                String(c) => { allow_comma = true; dbuf.write(c.data.as_bytes()).unwrap(); },
-                                Ident(c) => { /* TODO: labels */ },
-                                c => return Err(ParseError::UnexpectedSymbol(c.clone()))
-                            }
+                        if s.data.len() % 2 != 0 { return Err(ParseError::MalformedHexString(String(s.clone()))); }
+                        s.data.as_bytes().chunks(2).map(|c| {
+                            Some(((c[1] as char).to_digit(16)? + (c[0] as char).to_digit(16)? * 16) as u8)
+                        }).collect::<Option<_>>().ok_or(ParseError::MalformedHexString(String(s.clone())))?
+                    },
+                    pending_exprs: vec![]
+                },
+                [Ident(ref c), ref rest.., LineBreak] if c.data == "db" || c.data == "dw" || c.data == "dl" => {
+                    let size = match &*c.data {
+                        "db" => SizeHint::Byte,
+                        "dw" => SizeHint::Word,
+                        "dl" => SizeHint::Long,
+                        _ => unreachable!()
+                    };
+                    let mut dbuf = Vec::new();
+                    let mut allow_comma = false;
+                    let mut pending_exprs = Vec::new();
+                    for i in rest.split(|c| c.is_symbol(',')) {
+                        let mut expr = Expression::parse(&i, &mut state.borrow_mut().lls).map_err(ParseError::ExprError)?;
+                        let data = if let Some(c) = expr.is_const() {
+                            c
+                        } else {
+                            expr.with_size(size);
+                            pending_exprs.push((dbuf.len(), expr));
+                            0
+                        };
+                        match size {
+                            SizeHint::Byte => dbuf.write_u8(data as u8).unwrap(),
+                            SizeHint::Word => dbuf.write_u16::<LittleEndian>(data as u16).unwrap(),
+                            SizeHint::Long => dbuf.write_u24::<LittleEndian>(data as u32).unwrap(),
+                            _ => unreachable!()
                         }
-                        dbuf
+                    }
+                    RawData {
+                        data: dbuf,
+                        pending_exprs
                     }
                 },
                 [ref mut name @ Ident(_), LineBreak] |

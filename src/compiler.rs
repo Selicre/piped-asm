@@ -65,9 +65,8 @@ pub struct LabelRef {
 #[derive(Default, Debug)]
 pub struct LabeledChunk {
     pub data: Vec<u8>,
-    //pub label_refs: Vec<LabelRef>,
     pub pending_exprs: Vec<(usize, Expression)>,
-    // todo: internal absolute refs (e.g. JMP +)
+    pub diverging: bool,
     pub bank_hint: Option<u8>
 }
 
@@ -75,6 +74,7 @@ impl LabeledChunk {
     pub fn padding(len: usize, bank_hint: Option<u8>) -> Self {
         Self {
             data: vec![0; len],
+            diverging: true,
             pending_exprs: vec![],
             bank_hint
         }
@@ -123,13 +123,14 @@ pub struct Compiler {
 
 impl Compiler {
     pub fn new(filename: &str) -> Result<Self,Box<Error>> {
-        use std::io::{self,prelude::*};
+        use std::io::{self,prelude::*,BufReader};
         use std::fs::File;
         let state = CompilerState::default();
         let file = match filename {
             "-" => Box::new(io::stdin()) as Box<Read>,
             c => Box::new(File::open(filename)?)
         };
+        let file = BufReader::new(file);
         let lexed = Lexer::new(filename.to_string(), file.chars().map(|c| c.unwrap()));
         let inner = Box::new(Parser::new(lexed, state.clone()).map(|c| c.unwrap()));
         Ok(Self { inner, state, next_label: Span::ident("*root".to_string(), 0, Default::default()) })
@@ -150,20 +151,17 @@ impl Compiler {
 
         fn merge_labels(chunk: &mut LabeledChunk, labels: &HashMap<ExprNode, usize>, pending_exprs: Vec<(usize, Expression)>) {
             use std::io::{Cursor, Write, Seek, SeekFrom};
-            //println!("{:?} => {:?}", labels, labels_used);
             let mut cursor = Cursor::new(&mut chunk.data);
             let mut linker_exprs = Vec::new();
             for (offset, mut expr) in pending_exprs.into_iter() {
                 use self::ExprNode::*;
                 expr.each_mut(|c| {
-                    println!("{:?}\n----\n{:?}", labels, c);
                     *c = ExprNode::LabelOffset(match labels.get(c) {
                         Some(&c) => c as isize,
                         None => return
                     });
                 });
                 expr.reduce();
-                println!("Size of {:?}: {:?}", expr.root, expr.size);
                 match expr.root {
                     ExprNode::Empty => {},
                     ExprNode::Constant(c) => {
@@ -188,29 +186,6 @@ impl Compiler {
                 }
             }
             chunk.pending_exprs = linker_exprs;
-            /*for (size, addr, label) in labels_used.iter() {
-                let offset = labels[label] as isize;
-                // replace the address at i+1 with current
-                cursor.seek(SeekFrom::Start(*addr as u64 + 1)).unwrap();
-                let addr = *addr as isize;
-                match size {
-                    SizeHint::RelByte => cursor.write_i8((offset - addr - 2) as i8).unwrap(),
-                    SizeHint::RelWord => cursor.write_i16::<LittleEndian>((offset - addr - 3) as i16).unwrap(),
-                    SizeHint::Byte => {
-                        cursor.write_u8(0).unwrap();
-                        //println!("can't into absolute local labels yet, sorry")
-                    },
-                    SizeHint::Word => {
-                        cursor.write_u16::<LittleEndian>(0).unwrap();
-                        //println!("can't into absolute local labels yet, sorry")
-                    },
-                    SizeHint::Long => {
-                        cursor.write_u24::<LittleEndian>(0).unwrap();
-                        //println!("can't into absolute local labels yet, sorry")
-                    },
-                    _ => panic!("uh")
-                };
-            }*/
         }
         loop {
             let c = if let Some(c) = self.inner.next() { c } else {
@@ -232,37 +207,48 @@ impl Compiler {
                     let c = if let Span::Ident(c) = name { c } else { unreachable!() };
                     return Ok(Some((c.data, chunk)));
                 },
+                // TODO: move this to the parser? Maybe? It's a bit split rn
                 Label { name: Span::NegLabel(c) } => {
+                    //chunk.diverging = false; // doesn't actually make it divergent
                     let c = c.data;
                     let label = self.state.borrow_mut().lls.incr_neg_id(c);
                     labels.insert(label, chunk.data.len());
                 },
                 Label { name: Span::PosLabel(c) } => {
+                    chunk.diverging = false;
                     let c = c.data;
                     let label = self.state.borrow_mut().lls.incr_pos_id(c);
                     labels.insert(label, chunk.data.len());
                 },
                 LocalLabel { depth, name: Span::Ident(c) } => {
+                    chunk.diverging = false;
                     let s = self.state.borrow_mut().lls.push_local(depth, c.data);
                     labels.insert(s, chunk.data.len());
                 },
-                RawData { data } => {
+                RawData { data, pending_exprs: p } => {
+                    // Executing raw data is not advisable.
+                    chunk.diverging = true;
                     use std::io::Write;
+                    let len = chunk.data.len();
+                    pending_exprs.extend(p.into_iter().map(|(off, expr)| (len+off, expr)));
                     chunk.data.write(&data).unwrap();
                 },
                 Instruction { name, size, arg } => {
                     // TODO: check for modification of compiler context (e.g. static size
                     // checking)
                     use self::ExprNode::*;
-                    println!("PARSING: {:?}", name);
+                    //println!("PARSING: {:?}", name);
                     let mut const_only = true;
                     arg.expr.each(|c| match c {
                         Constant(_) => {},
                         Empty => {},
                         _ => const_only = false
                     });
-                    let s = instructions::size_hint(&name.as_ident().unwrap().to_uppercase())
-                        .and_then(arg.expr.size)
+                    let s = instructions::size_hint(&name.as_ident().unwrap().to_uppercase());
+                    // if implicit size (INC/DEC), then don't add it
+                    // TODO: fix inconsistency?
+                    const_only |= s == SizeHint::Implicit;
+                    let s = s.and_then(arg.expr.size)
                         .and_then(size.0);
                     if !const_only {
                         let mut new_expr = arg.expr.clone();
@@ -270,12 +256,13 @@ impl Compiler {
                         pending_exprs.push((chunk.data.len()+1, new_expr));
                     }
                     let arg = AddressingMode::parse(arg, s).map_err(|_| { print!("wrong addressing mode {:?}", name); panic!() })?;
-                    //println!("{} {:?}", name, arg);
-                    SInstruction::new(name.as_ident().unwrap(), arg).write_to(&mut chunk.data).unwrap();
+                    let instr = SInstruction::new(name.as_ident().unwrap(), arg);
+                    if instr.is_diverging() { chunk.diverging = true; }
+                    instr.write_to(&mut chunk.data).unwrap();
                 },
-                Attributes { .. } => {
-                    //println!("(some attributes, todo: change compiler context)");
-                }
+                Attributes { ref attrs } => {
+                    // todo
+                },
                 c => {
                     panic!("unknown statement {:?}", c);
                 }

@@ -18,7 +18,7 @@ pub enum CompileError {
 }
 
 // The argument size hint for when the argument is a label
-#[derive(Debug,Clone,Copy)]
+#[derive(Debug,Clone,Copy,PartialEq)]
 pub enum SizeHint {
     Implicit,   // INC A
     AContext,   // LDA #2
@@ -97,7 +97,7 @@ impl SizeHint {
 
     }*/
     pub fn and_then(self, other: SizeHint) -> SizeHint {
-        println!("{:?} => {:?}", self, other);
+        //println!("{:?} => {:?}", self, other);
         match other {
             SizeHint::Unspecified => self,
             c => c
@@ -127,6 +127,12 @@ impl Instruction {
     pub fn new(name: &str, arg: AddressingMode) -> Self {
         Instruction { name: name.to_uppercase(), arg }
     }
+    pub fn is_diverging(&self) -> bool {
+        match &*self.name {
+            "JMP" | "JML" | "BRA" | "BRL" | "RTS" | "RTL" => true,
+            _ => false
+        }
+    }
     pub fn write_to<W: Write>(&self, mut w: W) -> Result<(), CompileError> {
         let arg = &self.arg;
         use self::AddressingMode::*;
@@ -134,6 +140,11 @@ impl Instruction {
             ($opcode:expr) => {{
                 w.write_all(&[$opcode]).map_err(CompileError::WriteError)?;
                 arg.write_to(w).map_err(CompileError::WriteError)?;
+            }};
+            (@rep $arg:expr, $opcode:expr) => {{
+                for i in 0..$arg {
+                    w.write_all(&[$opcode]).map_err(CompileError::WriteError)?;
+                }
             }}
         }
         macro_rules! write_block_move {
@@ -151,7 +162,13 @@ impl Instruction {
             ($e:expr) => { match arg { BlockMove(b1,b2) => write_block_move!($e, *b1, *b2), _ => return Err(CompileError::AddressMode) } }
         }
         macro_rules! implied {
-            ($e:expr) => { kinds! { Implied => $e } }
+            ($e:expr) => {
+                match arg {
+                    Implied => write!($e),
+                    Immediate(c) => write!(@rep *c, $e),
+                    _ => return Err(CompileError::AddressMode)
+                }
+            }
         }
         macro_rules! relative {
             ($e:expr) => { kinds! { Relative => $e } }
@@ -165,7 +182,7 @@ impl Instruction {
                 Immediate =>    0x09 + $offset,
                 ImmediateWord =>0x09 + $offset,
                 Absolute =>     0x0D + $offset,
-                AbsLong =>         0x0F + $offset,
+                AbsLong =>      0x0F + $offset,
                 DPIndY =>       0x11 + $offset,
                 DPInd =>        0x12 + $offset,
                 StackY =>       0x13 + $offset,
@@ -173,7 +190,7 @@ impl Instruction {
                 DPIndLongY =>   0x17 + $offset,
                 AbsoluteY =>    0x19 + $offset,
                 AbsoluteX =>    0x1D + $offset,
-                AbsLongX =>        0x1F + $offset
+                AbsLongX =>     0x1F + $offset
             } }
         }
         macro_rules! common_implied {

@@ -7,6 +7,8 @@ use std::io::Seek;
 use std::io::SeekFrom;
 use std::io::Cursor;
 
+use std::time::Instant;
+
 use std::borrow::Cow;
 
 use std::error::Error;
@@ -40,7 +42,7 @@ struct Bank {
 impl Bank {
     fn append(&mut self, label: String, chunk: LabeledChunk) -> Option<usize> {
         let size = chunk.size();
-        println!("{}: ${:04X}", label, self.size);
+        //println!("{}: ${:04X}", label, self.size);
         self.chunks.insert(label, (self.size, chunk));
         self.size += size;
         Some(self.size)
@@ -50,12 +52,14 @@ impl Bank {
         // Currently, header is very hacked together. In the future, the header will be pinned to
         // 0x7FC0 automatically and exist in the same space as the rest of the chunks
                                    // Make space for the header
-        self.size + chunk.size() < if bank == 0 { 0x7FC0 } else { 0x8000 }
+        self.size + chunk.size() <= if bank == 0 { 0x7FC0 } else { 0x8000 }
     }
 }
 
 struct Banks {
     content: Vec<Bank>,
+    // todo: an _actual_ label graph
+    last_bank: u8,
     refs: HashMap<String, (u8, usize)>
 }
 
@@ -64,18 +68,26 @@ impl Banks {
         Self {
             // TODO: scale the rom accordingly
             content: (0..16).map(|_| Bank::default()).collect(),
+            last_bank: 0,
             refs: Default::default()
         }
     }
     fn append(&mut self, label: String, chunk: LabeledChunk) -> Option<usize> {
         let (bank_id, bank) = match chunk.bank_hint {
-            Some(c) => (c as usize, &mut self.content[c as usize]),
+            Some(c) => {
+                let bank = &mut self.content[c as usize];
+                if !bank.fits(c, &chunk) { return None; }
+                (c as usize, bank)
+            },
             None => {   // for shit like JSL routines
                 // find an appropriate bank
-                self.content.iter_mut().enumerate().find(|x| x.1.fits(x.0 as u8, &chunk))?
+                self.content.iter_mut().enumerate().skip(self.last_bank as usize).find(|x| x.1.fits(x.0 as u8, &chunk))?
             }
         };
-        self.refs.insert(label.clone(), (bank_id as u8, bank.size));
+
+        self.last_bank = bank_id as u8;
+        print!("{: >24}: ${:06X} (size: {:04X})", label, bank_id*0x10000 + bank.size + 0x8000, chunk.data.len());
+        self.refs.insert(label.clone(), (bank_id as u8, bank.size + 0x8000));
         bank.append(label, chunk);
         Some(bank.size)
     }
@@ -94,45 +106,33 @@ impl Banks {
                     expr.each_mut(|c| {
                         use expression::ExprNode::*;
                         match c {
-                            Label(d) => *c = ExprNode::Constant({let (b,c) = refs[d]; (b as i32)*0x10000+0x8000 + c as i32}),
+                            Label(d) => *c = ExprNode::Constant({
+                                let (b,c) = refs.get(d).unwrap_or_else(|| panic!("not found label: {}", d));
+                                (*b as i32)*0x10000 + *c as i32
+                            }),
                             LabelOffset(d) => *c = ExprNode::Constant((abs_offset as i32)+(*d as i32)),
                             _ => {}
                         }
                     });
                     expr.reduce();
                     let mut val = if let ExprNode::Constant(c) = expr.root { c } else { panic!("Can't collapse expression {}", expr.root) };
-                    println!("Reduced expression to {:04X} (offset: {:X}, expr_offset: {:X})", val, offset, expr_offset);
+                    //println!("Reduced expression to {:04X} (offset: {:X}, expr_offset: {:X})", val, offset, expr_offset);
                     c.seek(SeekFrom::Start(*expr_offset as u64)).unwrap();
                     match expr.size {
-                        SizeHint::Byte => c.write_u8(val as u8).unwrap(),
-                        SizeHint::Word => c.write_u16::<LittleEndian>(val as u16).unwrap(),
+                        SizeHint::Byte => {
+                            if val > 0xFF { println!("WARNING: expression out of range for word size"); }
+                            c.write_u8(val as u8).unwrap()
+                        },
+                        SizeHint::Word => {
+                            if val > 0xFFFF { println!("WARNING: expression out of range for word size"); }
+                            c.write_u16::<LittleEndian>(val as u16).unwrap()
+                        },
                         SizeHint::Long => c.write_u24::<LittleEndian>(val as u32).unwrap(),
                         SizeHint::RelByte => c.write_i8((val - abs_offset as i32 - 1) as i8).unwrap(),
                         SizeHint::RelWord => c.write_i16::<LittleEndian>((val - abs_offset as i32 - 1) as i16).unwrap(),
                         c => panic!("oh no what is this size {:?}", c)
                     }
                 }
-                /*for i in panic!() { //chunk.label_refs() {
-                    // todo: remove panic
-                    let (bank, val) = self.refs[&i.label];
-                    let mut val = val as isize;
-                    c.seek(SeekFrom::Start(i.offset as u64 + 1)).unwrap();
-                    // TODO: why 2?
-                    let rel_offset = |val| val - (offset + i.offset + 2) as isize;
-                    match i.size {
-                        SizeHint::Byte => c.write_u8(val as u8),
-                        SizeHint::Word => c.write_u16::<LittleEndian>(val as u16 + 0x8000),
-                        // TODO: figure out banks
-                        SizeHint::Long => {
-                            // also todo: calculate this based on lorom/hirom/etc.
-                            c.write_u16::<LittleEndian>(val as u16 + 0x8000)?;
-                            c.write_u8(bank)
-                        },
-                        SizeHint::RelByte => c.write_i8(rel_offset(val) as i8),
-                        SizeHint::RelWord => c.write_i16::<LittleEndian>(rel_offset(val) as i16),
-                        _ => panic!("linker error lel")
-                    }?;
-                }*/
                 bank_contents.write_all(&c.get_ref())?;
             }
             if *bank_id == 0 {
@@ -174,9 +174,9 @@ fn header(entry: u16, nmi: u16, irq: u16) -> LabeledChunk {
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // COP enable
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // BRK
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // ABORT
-    chunk.data.write_u16::<LittleEndian>(nmi + 0x8000)?;      // NMI
+    chunk.data.write_u16::<LittleEndian>(nmi)?;      // NMI
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // RESET (unused)
-    chunk.data.write_u16::<LittleEndian>(irq + 0x8000)?;   // IRQ
+    chunk.data.write_u16::<LittleEndian>(irq)?;   // IRQ
     // EMULATION
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;
@@ -184,7 +184,7 @@ fn header(entry: u16, nmi: u16, irq: u16) -> LabeledChunk {
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // unused
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // ABORT
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // NMI
-    chunk.data.write_u16::<LittleEndian>(entry + 0x8000)?;    // RESET (execution begins here)
+    chunk.data.write_u16::<LittleEndian>(entry)?;    // RESET (execution begins here)
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // IRQ
     assert_eq!(chunk.data.len(), 0x40);
     Ok(chunk) })(): Result<_,Box<Error>>).unwrap()
@@ -193,8 +193,19 @@ fn header(entry: u16, nmi: u16, irq: u16) -> LabeledChunk {
 
 pub fn link<W: Write, I: Iterator<Item=(String,LabeledChunk)>>(writer: W, iter: I) {
     let mut banks = Banks::new();
+    let mut now = Instant::now();
     for (name,block) in iter {
-        banks.append(name,block);
+        let elapsed = now.elapsed();
+        print!("[{: >7}µs]", elapsed.as_secs()*1000000 + elapsed.subsec_nanos() as u64/1000 );
+        let len = block.data.len();
+        let c = banks.append(name.clone(),block);
+        if c == None {
+            println!(" WARNING: can't fit label {} (size {})", name,len);
+        }
+        println!();
+        now = Instant::now();
     }
+    println!("Writing..");
     banks.write_to(writer).unwrap();
+    println!("Done!");
 }

@@ -1,0 +1,56 @@
+
+RunFrame:
+	REP #$30
+	LDA $4218
+	BIT #$0F00
+	BNE +
+	STZ $30
++	INC $30
+	;BNE ++
+	LDA $30
+	LSR
+	LSR
+	LSR
+	CMP #$0004
+	BMI +
+	LDA #$0004
++
+	CMP #$FFF8
+	BPL +
+	LDA #$FFF8
++
+	STA $00
+	LDA $4218
+	BIT #$0100
+	BEQ +
+	TAX
+	LDA $20
+	SEC : ADC $00
+	STA $20
+	TXA
++	BIT #$0200
+	BEQ +
+	TAX
+	LDA $20
+	CLC : SBC $00
+	STA $20
+	TXA
++	BIT #$0400
+	BEQ +
+	TAX
+	LDA $22
+	SEC : ADC $00
+	STA $22
+	TXA
++	BIT #$0800
+	BEQ +
+	TAX
+	LDA $22
+	CLC : SBC $00
+	STA $22
+	TXA
++
+++
+	INC $24
+	SEP #$30
+	RTS

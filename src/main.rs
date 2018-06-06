@@ -5,6 +5,8 @@
 
 #![allow(unused_imports, dead_code, unused_variables, unreachable_code)]
 
+//#![recursion_limit = "256"]
+
 extern crate byteorder;
 extern crate linked_hash_map;
 

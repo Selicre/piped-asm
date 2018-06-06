@@ -163,7 +163,7 @@ impl BinOp {
             } else {
                 panic!("no less-than yet")
             },
-            Symbol('>',_) => if list.peek(0).map(|c| c.is_symbol('<')).unwrap_or_default() {
+            Symbol('>',_) => if list.peek(0).map(|c| c.is_symbol('>')).unwrap_or_default() {
                 list.next();
                 Lsr
             } else {
@@ -173,7 +173,7 @@ impl BinOp {
             NegLabel(ref c) if c.data == 0 => Sub,
             Symbol('*',_) => Mul,
             Symbol('/',_) => Div,
-            ref c => panic!("{:?}", c) //return None
+            ref c => panic!("No such operand: {:?}", c) //return None
         })
     }
 }
@@ -268,6 +268,9 @@ impl Expression {
         let (root, size) = ExprNode::parse(expr, &mut state)?;
         Ok(Self { root, size })
     }
+    pub fn with_size(&mut self, size: SizeHint) {
+        self.size = self.size.and_then(size);
+    }
     pub fn empty() -> Self {
         Self { root: ExprNode::Empty, size: SizeHint::default() }
     }
@@ -289,6 +292,9 @@ impl ::std::ops::DerefMut for Expression {
     }
 }
 impl ExprNode {
+    pub fn is_const(&self) -> Option<i32> {
+        if let ExprNode::Constant(c) = self { Some(*c) } else { None }
+    }
     // todo: base this on a peekable iterator?
     fn parse(expr: &[Span], state: &mut ParserState) -> Result<(Self, SizeHint),ExprError> {
         if expr.len() == 1 {
@@ -305,11 +311,19 @@ impl ExprNode {
     pub fn reduce(&mut self) {
         use self::ExprNode::*;
         match self {
-            BinOp { op, lhs, rhs } => {
-                if let Some(c) = op.exec_node(&**lhs, &**rhs) {
+            BinOp { ref op, ref mut lhs, ref mut rhs } => {
+                lhs.reduce();
+                rhs.reduce();
+                if let Some(c) = op.exec_node(&lhs, &rhs) {
                     *self = c;
                 }
             },
+            UnOp(ref op,ref mut c) => {
+                c.reduce();
+                if let Some(c) = op.exec_node(&c) {
+                    *self = c;
+                }
+            }
             _ => {}
         }
     }
@@ -364,7 +378,7 @@ impl ExprNode {
                 let mut depth = 1;
                 // todo: maybe this can be done in a more straightforward way
                 while depth > 0 {
-                    let ch = c.next().ok_or(ExprError::EOF)?;
+                    let ch = c.next()?;
                     if ch.is_symbol('(') { depth += 1; }
                     if ch.is_symbol(')') { depth -= 1; }
                 }
@@ -373,21 +387,23 @@ impl ExprNode {
             },
             Symbol('.',_) => {
                 let mut depth = 1;
-                while c.peek(0).ok_or(ExprError::EOF)?.is_symbol('.') { depth += 1; c.next(); }
+                while c.peek(0)?.is_symbol('.') { depth += 1; c.next(); }
                 match c.next()? {
                     PosLabel(d) => state.lls.get_pos_id(d.data),
                     NegLabel(d) => state.lls.get_neg_id(d.data),
                     Ident(d) => state.lls.get_local(depth, d.data.clone()),
-                    _ => Err(ExprError::Other)?
+                    c => Err(ExprError::InvalidAfterDot(c.clone()))?
                 }
             },
-            _ => Err(ExprError::Other)?
+            c => Err(ExprError::InvalidOperand(c.clone()))?
         })
     }
 }
 
 #[derive(Debug)]
 pub enum ExprError {
+    InvalidOperand(Span),
+    InvalidAfterDot(Span),
     Other,
     EOF
 }

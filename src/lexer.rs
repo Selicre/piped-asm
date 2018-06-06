@@ -193,6 +193,7 @@ impl Span {
             Byte(_) => SizeHint::Byte,
             Word(_) => SizeHint::Word,
             Long(_) => SizeHint::Long,
+            Number(_) => SizeHint::Byte,
             _ => SizeHint::Unspecified
         }
     }
