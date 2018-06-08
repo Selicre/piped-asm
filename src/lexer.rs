@@ -114,6 +114,9 @@ impl<T> SpanData<T> {
     pub fn replace<U>(&self, new: U) -> SpanData<U> {
         SpanData { data: new, start: self.start.clone(), length: self.length }
     }
+    pub fn create(data: T) -> Self {
+        SpanData { data, start: Default::default(), length: 0 }
+    }
 }
 
 #[derive(Debug,Clone,PartialEq)]
@@ -163,6 +166,13 @@ impl Span {
             Some(&s.data)
         } else {
             None
+        }
+    }
+    pub fn as_number(&self) -> Option<i32> {
+        use self::Span::*;
+        match self {
+            Number(s) | Byte(s) | Word(s) | Long(s) => Some(s.data),
+            _ => None
         }
     }
     pub fn take_ident(self) -> Option<String> {

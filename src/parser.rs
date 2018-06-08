@@ -14,6 +14,8 @@ use compiler::CompilerState;
 
 use byteorder::{WriteBytesExt,LittleEndian};
 
+use attributes::{Attribute,AttributeError};
+
 #[derive(Debug, PartialEq)]
 pub enum ArgumentKind {
     Implied,
@@ -138,6 +140,7 @@ impl Argument {
 #[derive(Debug)]
 pub enum Statement {
     Label {
+        attrs: Vec<Attribute>,
         name: Span
     },
     LocalLabel {
@@ -145,10 +148,12 @@ pub enum Statement {
         name: Span
     },
     Instruction {
+        attrs: Vec<Attribute>,
         name: Span,
         size: (SizeHint,Option<Span>),
         arg: Argument
     },
+
     RawData {
         data: Vec<u8>,
         pending_exprs: Vec<(usize,Expression)>
@@ -163,9 +168,9 @@ impl fmt::Display for Statement {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use self::Statement::*;
         match self {
-            Label { name } => write!(f, "Label {}", name),
+            Label { name, .. } => write!(f, "Label {}", name),
             LocalLabel { depth, name } => write!(f, "Local label {}", name),
-            Instruction { name, size, arg } => write!(f, "Instruction: {} {}", name, arg),
+            Instruction { name, size, arg, .. } => write!(f, "Instruction: {} {}", name, arg),
             Attributes { attrs } => write!(f, "Attributes"),
             RawData { data, .. } => {
                 write!(f, "Raw data: ")?;
@@ -188,7 +193,8 @@ pub enum ParseError {
     GenericSyntaxError,
     UnknownAddressingMode(Span),
     IO(io::Error),
-    UnexpectedSymbol(Span)
+    UnexpectedSymbol(Span),
+    AttributeError(AttributeError)
 }
 
 // convenience for clearing the struct
@@ -234,6 +240,7 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
         use self::Span::*;
         use self::Statement::*;
         let mut buf = QueueClearHandle(&mut self.buf);
+        let mut attrs = Vec::new();
         let iter = &mut self.iter;
         let state = &self.state;
         let incsrc = &mut self.incsrc;
@@ -257,7 +264,7 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                 // Label:
                 [ref mut name @ Ident(_), Symbol(':',_)] |
                 [ref mut name @ PosLabel(_)] | [ref mut name @ NegLabel(_)] =>
-                    Label { name: name.take() },
+                    Label { attrs, name: name.take() },
                 // closure below is a workaround
                 [ref mut dots.., ref mut name @ Ident(_), Whitespace] |
                 [ref mut dots.., ref mut name @ Ident(_), LineBreak] |
@@ -269,6 +276,7 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                     use std::fs::File;
                     use lexer::Lexer;
                     let state = state.clone();
+                    println!("loading {}", filename);
                     let file = File::open(&filename.data).map_err(ParseError::IO)?;
                     let file = BufReader::new(file);
                     // no idea why a box is needed here
@@ -287,6 +295,7 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                         use std::fs::File;
                         use std::io::Read;
                         let mut c = Vec::new();
+                        println!("loading {}", name);
                         File::open(&name.data).map_err(ParseError::IO)?.read_to_end(&mut c).map_err(ParseError::IO)?;
                         c
                     },
@@ -338,12 +347,14 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                 },
                 [ref mut name @ Ident(_), LineBreak] |
                 [ref mut name @ Ident(_), Whitespace, Symbol(':',_)] => Instruction {
+                    attrs,
                     name: name.take(),
                     size: Default::default(),
                     arg: Argument::implied()
                 },
                 [ref mut name @ Ident(_), Whitespace, ref mut rest.., LineBreak] |
                 [ref mut name @ Ident(_), Whitespace, ref mut rest.., Whitespace, Symbol(':',_)] => Instruction {
+                    attrs,
                     name: name.take(),
                     size: Default::default(),
                     arg: Argument::parse(rest, state)?
@@ -351,12 +362,19 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                 [ref mut name @ Ident(_), Symbol('.',_), ref mut size @ Ident(_), Whitespace, ref mut rest.., LineBreak] |
                 [ref mut name @ Ident(_), Symbol('.',_), ref mut size @ Ident(_), Whitespace, ref mut rest.., Whitespace, Symbol(':',_)]
                     => Instruction {
+                    attrs,
                     name: name.take(),
                     size: (SizeHint::parse(size.as_ident().unwrap()).ok_or(ParseError::GenericSyntaxError)?, Some(size.take())),
                     arg: Argument::parse(rest, state)?
                 },
-                [Symbol('#',_), Symbol('[',_), ref rest.., Symbol(']',_)] => Attributes {
-                    attrs: rest.to_vec()
+                [Symbol('#',_), Symbol('[',_), ref rest.., Symbol(']',_)] => {
+                    let c = rest.split(|c| c.is_symbol(','))
+                        .map(Attribute::from_span)
+                        .collect::<Result<Vec<_>,_>>()
+                        .map_err(ParseError::AttributeError)?;
+                    attrs.extend(c);
+                    clear = true;
+                    continue;
                 },
                 [Whitespace] | [LineBreak] => { clear = true; continue; },
                 [ref line.., LineBreak] => return Err(ParseError::UnknownCommand(line.to_vec())),

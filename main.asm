@@ -16,10 +16,10 @@ Start:
 
 	REP #$20		; turn A 16-bit
 
-	LDA.w #Graphics01	; All of this will be in ROM instead of RAM later
+	LDA.w #Graphics01
 	STA $00
-	LDA #$0000
-	STA $02
+	LDY.b #Graphics01>>16
+	STY $02
 	LDA #$0000
 	STA $03
 	LDA #$4000
@@ -29,8 +29,8 @@ Start:
 	JSR LoadData
 	LDA.w #Palette
 	STA $00
-	LDA #$0000
-	STA $02
+	LDY.b #Palette>>16
+	STY $02
 	LDA #$0000
 	STA $03
 	LDA #$0080
@@ -40,9 +40,9 @@ Start:
 	JSR LoadData
 	LDA.w #BGTilemap01
 	STA $00
-	LDA #$0000
-	STA $02
-	LDA #$0040
+	LDY.b #BGTilemap01>>16
+	STY $02
+	LDA #$4000
 	STA $03
 	LDA #$2000
 	STA $05
@@ -173,7 +173,7 @@ LoadData:
 
 	LDY $07
 	BEQ +
-	LDA $02		; B bus address
+	LDA $03		; B bus address
 	STA $2116
 	LDY #$80	; Video port control
 	STY $2115
@@ -183,9 +183,7 @@ LoadData:
 	STY $4301
 	BRA .end
 
-+	LDY $02		; B bus address in CGRAM
-	STY $2121
-	LDY $03		; B bus address in CGRAM
++	LDY $03		; B bus address in CGRAM
 	STY $2121
 	LDY #%00000000
 	STY $4300	; 1 byte increment
@@ -200,6 +198,15 @@ LoadData:
 	PLA
 	RTS
 
+
+#[bank(01)]
+Graphics01:
+	incbin "graphics.bin"
+
+BGTilemap01:
+	incbin "map4.bin"
+	incbin "map3.bin"
+
 Palette:
 	dw $7eee, $7fdd, $0000, $0d71, $13ff, $1e9b, $137f, $03ff
 	dw $0000, $0000, $194f, $3e78, $573e, $03ff, $7bde, $7c1f
@@ -210,9 +217,3 @@ Palette:
 	dw $0000, $7fdd, $0000, $2d6b, $3def, $4e73, $6318, $739c
 	dw $0000, $7fff, $0000, $0320, $347d, $551e, $65ff, $7b1f
 
-Graphics01:
-	incbin "graphics.bin"
-
-BGTilemap01:
-	incbin "map4.bin"
-	incbin "map3.bin"

@@ -86,10 +86,10 @@ impl Banks {
         };
 
         self.last_bank = bank_id as u8;
-        print!("{: >24}: ${:06X} (size: {:04X})", label, bank_id*0x10000 + bank.size + 0x8000, chunk.data.len());
         self.refs.insert(label.clone(), (bank_id as u8, bank.size + 0x8000));
+        let addr = bank_id * 0x10000 + bank.size + 0x8000;
         bank.append(label, chunk);
-        Some(bank.size)
+        Some(addr)
     }
     fn seal(&mut self, bank: u8) {
         // lorom only, again
@@ -103,6 +103,7 @@ impl Banks {
                 let mut c = Cursor::new(chunk.data.clone());    // Cow?
                 for (expr_offset,expr) in chunk.pending_exprs.iter_mut() {
                     let abs_offset = *offset + *expr_offset;
+                    //println!("reducing expression at ${:04X}: {}", abs_offset, expr);
                     expr.each_mut(|c| {
                         use expression::ExprNode::*;
                         match c {
@@ -110,26 +111,26 @@ impl Banks {
                                 let (b,c) = refs.get(d).unwrap_or_else(|| panic!("not found label: {}", d));
                                 (*b as i32)*0x10000 + *c as i32
                             }),
-                            LabelOffset(d) => *c = ExprNode::Constant((abs_offset as i32)+(*d as i32)),
+                            LabelOffset(d) => *c = ExprNode::Constant(0x8000 + (*offset as i32)+(*d as i32)),
                             _ => {}
                         }
                     });
                     expr.reduce();
                     let mut val = if let ExprNode::Constant(c) = expr.root { c } else { panic!("Can't collapse expression {}", expr.root) };
-                    //println!("Reduced expression to {:04X} (offset: {:X}, expr_offset: {:X})", val, offset, expr_offset);
+                    //println!("Reduced expression to {:04X}", val);
                     c.seek(SeekFrom::Start(*expr_offset as u64)).unwrap();
                     match expr.size {
                         SizeHint::Byte => {
-                            if val > 0xFF { println!("WARNING: expression out of range for word size"); }
+                            //if val > 0xFF { println!("WARNING: expression out of range for word size"); }
                             c.write_u8(val as u8).unwrap()
                         },
                         SizeHint::Word => {
-                            if val > 0xFFFF { println!("WARNING: expression out of range for word size"); }
+                            //if val > 0xFFFF { println!("WARNING: expression out of range for word size"); }
                             c.write_u16::<LittleEndian>(val as u16).unwrap()
                         },
                         SizeHint::Long => c.write_u24::<LittleEndian>(val as u32).unwrap(),
                         SizeHint::RelByte => c.write_i8((val - abs_offset as i32 - 1) as i8).unwrap(),
-                        SizeHint::RelWord => c.write_i16::<LittleEndian>((val - abs_offset as i32 - 1) as i16).unwrap(),
+                        SizeHint::RelWord => c.write_i16::<LittleEndian>((val - abs_offset as i32 - 2 - 0x8000) as i16).unwrap(),
                         c => panic!("oh no what is this size {:?}", c)
                     }
                 }
@@ -163,7 +164,7 @@ fn header(entry: u16, nmi: u16, irq: u16) -> LabeledChunk {
     chunk.data.write_all(b"SUPER MARIOWORLD     ")?;
     chunk.data.write_all(&[
     // ROM makeup, type, size (TODO!), SRAM size, destination code
-        0x23, 0x00, 0x0C, 0x07, 0x01, 0x33 ])?;
+        0x20, 0x02, 0x09, 0x01, 0x01, 0x01 ])?;
     chunk.data.write_u8(0x00)?;                      // Version
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // ROM checksum complement stub
     chunk.data.write_u16::<LittleEndian>(0x0000)?;   // ROM checksum stub
@@ -190,22 +191,27 @@ fn header(entry: u16, nmi: u16, irq: u16) -> LabeledChunk {
     Ok(chunk) })(): Result<_,Box<Error>>).unwrap()
 }
 
+fn micros(now: Instant) -> u64 {
+    let elapsed = now.elapsed();
+    elapsed.as_secs()*1000000 + elapsed.subsec_nanos() as u64/1000
+}
 
 pub fn link<W: Write, I: Iterator<Item=(String,LabeledChunk)>>(writer: W, iter: I) {
     let mut banks = Banks::new();
     let mut now = Instant::now();
     for (name,block) in iter {
-        let elapsed = now.elapsed();
-        print!("[{: >7}µs]", elapsed.as_secs()*1000000 + elapsed.subsec_nanos() as u64/1000 );
         let len = block.data.len();
         let c = banks.append(name.clone(),block);
-        if c == None {
-            println!(" WARNING: can't fit label {} (size {})", name,len);
+        match c {
+            Some(a) => {
+                println!("[\x1B[38;5;117m{: >7}µs\x1B[0m] {: >24}: $\x1B[38;5;118m{:06X}\x1B[0m (size: \x1B[38;5;118m{:04X}\x1B[0m)", micros(now), name, a, len);
+            },
+            None => println!("WARNING: can't fit label {} (size {})", name,len)
         }
-        println!();
         now = Instant::now();
     }
     println!("Writing..");
+    let now = Instant::now();
     banks.write_to(writer).unwrap();
-    println!("Done!");
+    println!("Done in {}µs", micros(now));
 }

@@ -6,7 +6,7 @@ use std::error::Error;
 use std::rc::Rc;
 use std::cell::RefCell;
 
-use lexer::{Lexer,Span};
+use lexer::{Lexer,Span,SpanData};
 
 use parser::{Parser,Statement};
 use instructions;
@@ -20,6 +20,8 @@ use std::io::Write;
 use byteorder::WriteBytesExt;
 
 use expression::{Expression,ExprNode,LocalLabelState};
+
+use attributes::Attribute;
 
 struct CompilerContext {
     local: CtxInner,
@@ -66,6 +68,7 @@ pub struct LabelRef {
 pub struct LabeledChunk {
     pub data: Vec<u8>,
     pub pending_exprs: Vec<(usize, Expression)>,
+    pub attrs: Vec<Attribute>,
     pub diverging: bool,
     pub bank_hint: Option<u8>
 }
@@ -75,6 +78,7 @@ impl LabeledChunk {
         Self {
             data: vec![0; len],
             diverging: true,
+            attrs: Vec::new(),
             pending_exprs: vec![],
             bank_hint
         }
@@ -118,7 +122,8 @@ pub struct Compiler {
     state: CompilerState,
     // fix?
     inner: Box<Iterator<Item=Statement>>,
-    next_label: Span
+    next_label: Option<SpanData<String>>,
+    next_attrs: Vec<Attribute>
 }
 
 impl Compiler {
@@ -133,7 +138,7 @@ impl Compiler {
         let file = BufReader::new(file);
         let lexed = Lexer::new(filename.to_string(), file.chars().map(|c| c.unwrap()));
         let inner = Box::new(Parser::new(lexed, state.clone()).map(|c| c.unwrap()));
-        Ok(Self { inner, state, next_label: Span::ident("*root".to_string(), 0, Default::default()) })
+        Ok(Self { inner, state, next_attrs: Vec::new(), next_label: Some(SpanData::create("*root".to_string())) })
     }
     fn res_next(&mut self) -> Result<Option<(String, LabeledChunk)>,CompileError> {
         use self::Statement::*;
@@ -190,31 +195,35 @@ impl Compiler {
         loop {
             let c = if let Some(c) = self.inner.next() { c } else {
                 return match self.next_label.take() {
-                    Span::Empty => Ok(None),
-                    Span::Ident(c) => {
+                    None => Ok(None),
+                    Some(c) => {
                         merge_labels(&mut chunk, &labels, pending_exprs);
                         Ok(Some((c.data, chunk)))
-                    },
-                    _ => unreachable!()
-                };
+                    }
+                }
             };
 
             match c {
                 // Split here
-                Label { name: mut name @ Span::Ident(_) } => {
+                Label { name: Span::Ident(mut name), mut attrs } => {
                     merge_labels(&mut chunk, &labels, pending_exprs);
-                    mem::swap(&mut self.next_label, &mut name);
-                    let c = if let Span::Ident(c) = name { c } else { unreachable!() };
-                    return Ok(Some((c.data, chunk)));
+                    mem::swap(self.next_label.as_mut().unwrap(), &mut name);
+                    mem::swap(&mut self.next_attrs, &mut attrs);
+                    for i in &attrs { match i {
+                        Attribute::Bank(c) => chunk.bank_hint = Some(*c),
+                        _ => {}
+                    } }
+                    chunk.attrs = attrs;
+                    return Ok(Some((name.data, chunk)));
                 },
                 // TODO: move this to the parser? Maybe? It's a bit split rn
-                Label { name: Span::NegLabel(c) } => {
+                Label { name: Span::NegLabel(c), .. } => {
                     //chunk.diverging = false; // doesn't actually make it divergent
                     let c = c.data;
                     let label = self.state.borrow_mut().lls.incr_neg_id(c);
                     labels.insert(label, chunk.data.len());
                 },
-                Label { name: Span::PosLabel(c) } => {
+                Label { name: Span::PosLabel(c), .. } => {
                     chunk.diverging = false;
                     let c = c.data;
                     let label = self.state.borrow_mut().lls.incr_pos_id(c);
@@ -233,7 +242,7 @@ impl Compiler {
                     pending_exprs.extend(p.into_iter().map(|(off, expr)| (len+off, expr)));
                     chunk.data.write(&data).unwrap();
                 },
-                Instruction { name, size, arg } => {
+                Instruction { attrs, name, size, arg } => {
                     // TODO: check for modification of compiler context (e.g. static size
                     // checking)
                     use self::ExprNode::*;

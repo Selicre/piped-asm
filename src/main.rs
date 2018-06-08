@@ -43,6 +43,8 @@ mod linker;
 
 mod expression;
 
+mod attributes;
+
 fn run() -> Result<(),Box<Error>> {
     let args = env::args().collect::<Vec<_>>();
     // TODO: arg parsing
