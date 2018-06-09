@@ -101,7 +101,7 @@ impl Argument {
             }};
             ($spans:ident => $expr:expr) => { ($expr, $spans) };
         }
-        let (mut kind, spans) = modeparser! [ spans => [
+        let (mut kind, expr_spans) = modeparser! [ spans => [
             Direct,
             x_suf => IndexedX,
             y_suf => [
@@ -119,6 +119,11 @@ impl Argument {
             ],
             brackets => IndLong
         ]];
+        // Additional check for a malformed mode
+        if expr_spans.len() >= 3 && [x_suf,y_suf,s_suf,parens,brackets].into_iter().any(|i| i(expr_spans).is_some()) {
+            return Err(ParseError::UnknownAddressingMode(Span::coagulate(spans)))
+        }
+        let spans = expr_spans;
         // TODO: full support for expressions
         match spans {
             [Symbol('#',_), ref c1, Symbol(',',_), Symbol('#',_), ref c2] |
@@ -153,13 +158,9 @@ pub enum Statement {
         size: (SizeHint,Option<Span>),
         arg: Argument
     },
-
     RawData {
         data: Vec<u8>,
         pending_exprs: Vec<(usize,Expression)>
-    },
-    Attributes {
-        attrs: Vec<Span>
     },
     Error(ParseError)
 }
@@ -171,7 +172,6 @@ impl fmt::Display for Statement {
             Label { name, .. } => write!(f, "Label {}", name),
             LocalLabel { depth, name } => write!(f, "Local label {}", name),
             Instruction { name, size, arg, .. } => write!(f, "Instruction: {} {}", name, arg),
-            Attributes { attrs } => write!(f, "Attributes"),
             RawData { data, .. } => {
                 write!(f, "Raw data: ")?;
                 for i in data { write!(f, "{:02X} ", i)? }
@@ -197,29 +197,27 @@ pub enum ParseError {
     AttributeError(AttributeError)
 }
 
-// convenience for clearing the struct
-struct QueueClearHandle<'a,T: 'a>(&'a mut Vec<T>);
-impl<'a,T> Drop for QueueClearHandle<'a,T> {
-    fn drop(&mut self) {
-        self.0.clear();
-    }
-}
-impl<'a,T> ops::Deref for QueueClearHandle<'a,T> {
-    type Target = Vec<T>;
-    fn deref(&self) -> &Vec<T> {
-        &*self.0
-    }
-}
-impl<'a,T> ops::DerefMut for QueueClearHandle<'a,T> {
-    fn deref_mut(&mut self) -> &mut Vec<T> {
-        self.0
+// obviously TODO
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use colors::prelude::*;
+        write!(f, "{}", "Error: ".pretty() + Color(1) + Bold)?;
+        match self {
+            ParseError::ExprError(ref e) => {
+                write!(f, "Expression error {:?}", e)
+            },
+            ParseError::UnknownAddressingMode(ref e) => {
+                write!(f, "Unknown addressing mode {} at {{location}}", e)
+            },
+            e => write!(f, "Other error (TODO!)\n{:?}", e)
+        }
     }
 }
 
 pub struct Parser<S> {
     iter: S,
     // todo: do this properly
-    incsrc: Option<Box<Iterator<Item=Result<Statement,ParseError>>>>,
+    incsrc: Option<Box<Iterator<Item=Statement>>>,
     state: CompilerState,
     buf: Vec<Span>
 }
@@ -229,8 +227,8 @@ impl<S: Iterator<Item=Span>> Parser<S> {
     }
 }
 impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
-    type Item = Result<Statement,ParseError>;
-    fn next(&mut self) -> Option<Result<Statement,ParseError>> {
+    type Item = Statement;
+    fn next(&mut self) -> Option<Statement> {
         if let Some(mut c) = self.incsrc.take() {
             match c.next() {
                 Some(d) => { self.incsrc = Some(c); return Some(d) },
@@ -239,7 +237,7 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
         }
         use self::Span::*;
         use self::Statement::*;
-        let mut buf = QueueClearHandle(&mut self.buf);
+        let mut buf = Vec::new();
         let mut attrs = Vec::new();
         let iter = &mut self.iter;
         let state = &self.state;
@@ -260,7 +258,7 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
             };
             buf.push(c);
             // TODO: this entire thing should be replaced with a proper parser tree.
-            return Ok(Some(match &mut **buf {
+            return Ok(Some(match &mut *buf {
                 // Label:
                 [ref mut name @ Ident(_), Symbol(':',_)] |
                 [ref mut name @ PosLabel(_)] | [ref mut name @ NegLabel(_)] =>
@@ -276,7 +274,6 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                     use std::fs::File;
                     use lexer::Lexer;
                     let state = state.clone();
-                    println!("loading {}", filename);
                     let file = File::open(&filename.data).map_err(ParseError::IO)?;
                     let file = BufReader::new(file);
                     // no idea why a box is needed here
@@ -286,7 +283,7 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                     let first_stmt = parsed.next();
                     *incsrc = Some(parsed);
                     match first_stmt {
-                        Some(c) => c?,
+                        Some(c) => c,
                         None => { clear = true; continue }
                     }
                 },
@@ -295,7 +292,6 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                         use std::fs::File;
                         use std::io::Read;
                         let mut c = Vec::new();
-                        println!("loading {}", name);
                         File::open(&name.data).map_err(ParseError::IO)?.read_to_end(&mut c).map_err(ParseError::IO)?;
                         c
                     },
@@ -382,9 +378,9 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
             }));
         })();
         match res {
-            Ok(Some(c)) => Some(Ok(c)),
+            Ok(Some(c)) => Some(c),
             Ok(None) => None,
-            Err(e) => Some(Err(e))
+            Err(e) => Some(Statement::Error(e))
         }
     }
 }

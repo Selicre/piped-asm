@@ -116,7 +116,6 @@ MainLoop:
 	STZ $10
 	BRA MainLoop
 
-
 incsrc "runframe.asm"
 
 VBlank:

@@ -243,22 +243,7 @@ fn parse_expr(expr: &mut SpanList, prev: Option<ExprNode>, depth: usize, state: 
         Ok(term)
     }
 }
-/*
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn test1() {
-        use lexer::Lexer;
-        let expr = Lexer::new("(test)".into(), ".- - -.-".chars()).collect::<Vec<_>>();
-        println!("{}", expr.iter().map(|c| format!("{}",c)).collect::<Vec<_>>().join(", "));
-        let out = ExprNode::parse(&expr[..expr.len()-1]).unwrap().0;
-        println!("OUTPUT: {}", out);
-        let mut d = Vec::new();
-        out.each(|c| d.push(c.clone()));
-        println!("{:?}",d);
-    }
-}*/
+
 impl Expression {
     pub fn parse(expr: &[Span], lls: &mut LocalLabelState) -> Result<Self,ExprError> {
         let mut state = ParserState {

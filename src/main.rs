@@ -1,11 +1,9 @@
 // A small compiler for the 65816 CPU architecture that also supports patches
-#![feature(io, if_while_or_patterns, type_ascription, slice_patterns, iterator_flatten, try_trait)]
+#![feature(io, if_while_or_patterns, type_ascription, slice_patterns, iterator_flatten, try_trait, specialization)]
 
 // while development happens - don't wanna miss the important warns
 
 #![allow(unused_imports, dead_code, unused_variables, unreachable_code)]
-
-//#![recursion_limit = "256"]
 
 extern crate byteorder;
 extern crate linked_hash_map;
@@ -44,6 +42,8 @@ mod linker;
 mod expression;
 
 mod attributes;
+
+mod colors;
 
 fn run() -> Result<(),Box<Error>> {
     let args = env::args().collect::<Vec<_>>();

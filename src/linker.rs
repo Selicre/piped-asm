@@ -67,7 +67,7 @@ impl Banks {
     fn new() -> Self {
         Self {
             // TODO: scale the rom accordingly
-            content: (0..16).map(|_| Bank::default()).collect(),
+            content: (0..32).map(|_| Bank::default()).collect(),
             last_bank: 0,
             refs: Default::default()
         }
@@ -164,7 +164,7 @@ fn header(entry: u16, nmi: u16, irq: u16) -> LabeledChunk {
     chunk.data.write_all(b"SUPER MARIOWORLD     ")?;
     chunk.data.write_all(&[
     // ROM makeup, type, size (TODO!), SRAM size, destination code
-        0x20, 0x02, 0x09, 0x01, 0x01, 0x01 ])?;
+        0x20, 0x02, 0x10, 0x01, 0x01, 0x01 ])?;
     chunk.data.write_u8(0x00)?;                      // Version
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // ROM checksum complement stub
     chunk.data.write_u16::<LittleEndian>(0x0000)?;   // ROM checksum stub

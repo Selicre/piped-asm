@@ -137,23 +137,20 @@ impl Compiler {
         };
         let file = BufReader::new(file);
         let lexed = Lexer::new(filename.to_string(), file.chars().map(|c| c.unwrap()));
-        let inner = Box::new(Parser::new(lexed, state.clone()).map(|c| c.unwrap()));
+        let inner = Box::new(Parser::new(lexed, state.clone()));
         Ok(Self { inner, state, next_attrs: Vec::new(), next_label: Some(SpanData::create("*root".to_string())) })
     }
     fn res_next(&mut self) -> Result<Option<(String, LabeledChunk)>,CompileError> {
         use self::Statement::*;
         let mut chunk = LabeledChunk::default();
-        #[derive(Debug, Hash, PartialEq, Eq)]
-        enum LabelKind {
-            Pos { depth: usize, id: usize },
-            Neg { depth: usize, id: usize },
-            Local { stack: Vec<String> },
-        }
+
         // label name -> offset
         let mut labels: HashMap<ExprNode, usize> = HashMap::new();
         // all the places where it should be replaced
         let mut pending_exprs: Vec<(usize, Expression)> = Vec::new();
-
+        // This function calculates all expressions that can be reduced (usually ones with local
+        // labels), and if it ends up being a constant, it replaces the part in the chunk with that
+        // constant.
         fn merge_labels(chunk: &mut LabeledChunk, labels: &HashMap<ExprNode, usize>, pending_exprs: Vec<(usize, Expression)>) {
             use std::io::{Cursor, Write, Seek, SeekFrom};
             let mut cursor = Cursor::new(&mut chunk.data);
@@ -194,6 +191,7 @@ impl Compiler {
         }
         loop {
             let c = if let Some(c) = self.inner.next() { c } else {
+                // If the iterator is done, return the remaining stuff.
                 return match self.next_label.take() {
                     None => Ok(None),
                     Some(c) => {
@@ -269,8 +267,9 @@ impl Compiler {
                     if instr.is_diverging() { chunk.diverging = true; }
                     instr.write_to(&mut chunk.data).unwrap();
                 },
-                Attributes { ref attrs } => {
-                    // todo
+                Error(e) => {
+                    println!("{}",e);
+                    panic!("Error occured");
                 },
                 c => {
                     panic!("unknown statement {:?}", c);
