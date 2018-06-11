@@ -4,7 +4,7 @@ use byteorder::LittleEndian;
 use std::io::Write;
 use byteorder::WriteBytesExt;
 use std::io;
-use instructions::{self,SizeHint};
+use instructions::SizeHint;
 use expression::ExprNode;
 
 #[derive(Debug)]

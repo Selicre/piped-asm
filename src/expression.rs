@@ -147,7 +147,7 @@ impl BinOp {
                 ExprNode::Constant(self.execute(*l as i32, *r as i32)),
             (ExprNode::LabelOffset(l), ExprNode::Constant(r)) if *self == BinOp::Add || *self == BinOp::Sub =>
                 ExprNode::LabelOffset(self.execute(*l as i32,*r) as isize),
-            (lhs,rhs) => return None
+            _ => return None
         })
     }
     fn parse(list: &mut SpanList) -> Option<Self> {
@@ -293,24 +293,28 @@ impl ExprNode {
         let expr = parse_expr(&mut list, None, 0, state)?;
         Ok((expr, state.size_hint))
     }
-    pub fn reduce(&mut self) {
+    pub fn reduce(&mut self) -> bool {
         use self::ExprNode::*;
+        let mut result = false;
         match self {
             BinOp { ref op, ref mut lhs, ref mut rhs } => {
-                lhs.reduce();
-                rhs.reduce();
+                result |= lhs.reduce();
+                result |= rhs.reduce();
                 if let Some(c) = op.exec_node(&lhs, &rhs) {
                     *self = c;
+                    result = true;
                 }
             },
             UnOp(ref op,ref mut c) => {
-                c.reduce();
+                result |= c.reduce();
                 if let Some(c) = op.exec_node(&c) {
                     *self = c;
+                    result = true;
                 }
             }
             _ => {}
         }
+        result
     }
     pub fn with_size(self, size: SizeHint) -> Expression {
         Expression { root: self, size }
@@ -358,6 +362,7 @@ impl ExprNode {
                 state.size_hint = state.size_hint.max(next.size());
                 ExprNode::Constant(d.data)
             },
+            String(c) => ExprNode::Str(c.data.clone()),
             Symbol('(',_) => {
                 let prev = c.cur();
                 let mut depth = 1;
@@ -367,7 +372,7 @@ impl ExprNode {
                     if ch.is_symbol('(') { depth += 1; }
                     if ch.is_symbol(')') { depth -= 1; }
                 }
-                let (expr, size) = Self::parse(&c[prev..c.cur()-1], state)?;
+                let (expr, _size) = Self::parse(&c[prev..c.cur()-1], state)?;
                 expr
             },
             Symbol('.',_) => {

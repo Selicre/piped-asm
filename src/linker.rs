@@ -9,22 +9,20 @@ use std::io::Cursor;
 
 use std::time::Instant;
 
-use std::borrow::Cow;
-
 use std::error::Error;
 
-use std::collections::HashMap;
+use std::collections::{HashMap,HashSet};
 
 use byteorder::WriteBytesExt;
 use byteorder::LittleEndian;
 
 use linked_hash_map::LinkedHashMap;
 
-use compiler::LabeledChunk;
+use compiler::{CompileData,LabeledChunk};
 
 use instructions::SizeHint;
 
-use expression::ExprNode;
+use expression::{Expression,ExprNode};
 
 // Anything that isn't directly bank data (lorom mode, etc.), also TODO
 struct BankContext {
@@ -60,7 +58,8 @@ struct Banks {
     content: Vec<Bank>,
     // todo: an _actual_ label graph
     last_bank: u8,
-    refs: HashMap<String, (u8, usize)>
+    refs: HashMap<String, (u8, usize)>,
+    defines: HashMap<String, Expression>
 }
 
 impl Banks {
@@ -69,10 +68,14 @@ impl Banks {
             // TODO: scale the rom accordingly
             content: (0..32).map(|_| Bank::default()).collect(),
             last_bank: 0,
+            defines: Default::default(),
             refs: Default::default()
         }
     }
-    fn append(&mut self, label: String, chunk: LabeledChunk) -> Option<usize> {
+    fn add_define(&mut self, label: String, expr: Expression) {
+        self.defines.insert(label, expr);
+    }
+    fn append_chunk(&mut self, label: String, chunk: LabeledChunk) -> Option<usize> {
         let (bank_id, bank) = match chunk.bank_hint {
             Some(c) => {
                 let bank = &mut self.content[c as usize];
@@ -97,31 +100,58 @@ impl Banks {
     }
     fn write_to<W: Write>(&mut self, mut w: W) -> Result<(), Box<Error>> {
         let refs = &self.refs;
+        let defines = &self.defines;
+        let mut groups = HashMap::<String,Vec<String>>::new();
+        let mut fallthrough_last = None;
         for (ref bank_id, ref mut bank) in self.content.iter_mut().enumerate() {
             let mut bank_contents = Vec::with_capacity(0x8000);
             for (label, (offset, chunk)) in bank.chunks.iter_mut() {
                 let mut c = Cursor::new(chunk.data.clone());    // Cow?
-                for (expr_offset,expr) in chunk.pending_exprs.iter_mut() {
-                    let abs_offset = *offset + *expr_offset;
-                    //println!("reducing expression at ${:04X}: {}", abs_offset, expr);
+                let mut word_refs = Vec::new();
+                if let Some(c) = fallthrough_last.take() {
+                    groups.get_mut(&c).unwrap().push(label.to_string());
+                }
+                if !chunk.diverging { fallthrough_last = Some(label.clone()) }
+                for mut r in chunk.pending_exprs.iter_mut() {
+                    let (expr_offset,expr) = (r.offset,&mut r.expr);
+                    let abs_offset = *offset + expr_offset;
+                    let mut size = expr.size;
+                    for i in 0.. {
+                        expr.each_mut(|c| {
+                            match c {
+                                ExprNode::Label(d) => if let Some(e) = defines.get(d) {
+                                    *c = e.root.clone();
+                                    //size = size.max(e.size);
+                                },
+                                _ => {}
+                            }
+                        });
+                        // if can't reduce any more, good
+                        if !expr.reduce() { break; }
+                        if i > 64 { panic!("Recursion too deep in {} (64 max)", label) }
+                    }
                     expr.each_mut(|c| {
                         use expression::ExprNode::*;
                         match c {
-                            Label(d) => *c = ExprNode::Constant({
-                                let (b,c) = refs.get(d).unwrap_or_else(|| panic!("not found label: {}", d));
-                                (*b as i32)*0x10000 + *c as i32
-                            }),
+                            Label(d) => {
+                                *c = ExprNode::Constant({
+                                    if size == SizeHint::Word || size == SizeHint::RelByte || size == SizeHint::RelWord {
+                                        word_refs.push(d.to_string());
+                                    }
+                                    let (b,c) = refs.get(d).unwrap_or_else(|| panic!("not found label: {}", d));
+                                    (*b as i32)*0x10000 + *c as i32
+                                })
+                            },
                             LabelOffset(d) => *c = ExprNode::Constant(0x8000 + (*offset as i32)+(*d as i32)),
                             _ => {}
                         }
                     });
                     expr.reduce();
                     let mut val = if let ExprNode::Constant(c) = expr.root { c } else { panic!("Can't collapse expression {}", expr.root) };
-                    //println!("Reduced expression to {:04X}", val);
-                    c.seek(SeekFrom::Start(*expr_offset as u64)).unwrap();
-                    match expr.size {
+                    c.seek(SeekFrom::Start(expr_offset as u64)).unwrap();
+                    match size {
                         SizeHint::Byte => {
-                            //if val > 0xFF { println!("WARNING: expression out of range for word size"); }
+                            //if val > 0xFF { println!("WARNING: expression out of range for byte size"); }
                             c.write_u8(val as u8).unwrap()
                         },
                         SizeHint::Word => {
@@ -134,8 +164,10 @@ impl Banks {
                         c => panic!("oh no what is this size {:?}", c)
                     }
                 }
+                groups.insert(label.to_string(), word_refs);
                 bank_contents.write_all(&c.get_ref())?;
             }
+
             if *bank_id == 0 {
                 let (b, start) = self.refs["Start"];
                 if b != 0 { Err("bank for Start not 0")?; }
@@ -151,6 +183,8 @@ impl Banks {
             }
             w.write_all(&bank_contents)?;
         }
+        //let mut f = ::std::fs::File::create("out-graph.json").unwrap();
+        //writeln!(f, "{:?}", groups);
         Ok(())
     }
 }
@@ -196,19 +230,27 @@ fn micros(now: Instant) -> u64 {
     elapsed.as_secs()*1000000 + elapsed.subsec_nanos() as u64/1000
 }
 
-pub fn link<W: Write, I: Iterator<Item=(String,LabeledChunk)>>(writer: W, iter: I) {
+pub fn link<W: Write, I: Iterator<Item=CompileData>>(writer: W, iter: I) {
     let mut banks = Banks::new();
     let mut now = Instant::now();
-    for (name,block) in iter {
-        let len = block.data.len();
-        let c = banks.append(name.clone(),block);
+    for c in iter {
         match c {
-            Some(a) => {
-                println!("[\x1B[38;5;117m{: >7}µs\x1B[0m] {: >24}: $\x1B[38;5;118m{:06X}\x1B[0m (size: \x1B[38;5;118m{:04X}\x1B[0m)", micros(now), name, a, len);
+            CompileData::Chunk { label, chunk } => {
+                let len = chunk.data.len();
+                let c = banks.append_chunk(label.clone(),chunk);
+                match c {
+                    Some(a) => {
+                        println!("[\x1B[38;5;117m{: >7}µs\x1B[0m] {: >24}: $\x1B[38;5;118m{:06X}\x1B[0m (size: \x1B[38;5;118m{:04X}\x1B[0m)", micros(now), label, a, len);
+                    },
+                    None => println!("WARNING: can't fit label {} (size {})", label,len)
+                }
+                now = Instant::now();
             },
-            None => println!("WARNING: can't fit label {} (size {})", name,len)
+            CompileData::Define { label, expr } => {
+                banks.add_define(label, expr);
+            },
+            c => panic!("{:?}",c) // todo: handle
         }
-        now = Instant::now();
     }
     println!("Writing..");
     let now = Instant::now();

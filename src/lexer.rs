@@ -1,5 +1,4 @@
 use std::mem;
-use std::ops;
 use std::rc::Rc;
 use std::fmt::{self, Display};
 
@@ -81,7 +80,7 @@ impl<R: Iterator<Item=char>> Iterator for Lexer<R> {
             Some(c) => Some(c),
             None => {
                 self.finished = true;
-                Some(Span::line_break(self.inner.0.location()))
+                Some(Span::line_break())
             }
         }
     }
@@ -111,9 +110,6 @@ impl<T: fmt::UpperHex> fmt::UpperHex for SpanData<T> {
 }
 
 impl<T> SpanData<T> {
-    pub fn replace<U>(&self, new: U) -> SpanData<U> {
-        SpanData { data: new, start: self.start.clone(), length: self.length }
-    }
     pub fn create(data: T) -> Self {
         SpanData { data, start: Default::default(), length: 0 }
     }
@@ -175,13 +171,6 @@ impl Span {
             _ => None
         }
     }
-    pub fn take_ident(self) -> Option<String> {
-        if let Span::Ident(s) = self {
-            Some(s.data)
-        } else {
-            None
-        }
-    }
     pub fn take(&mut self) -> Self {
         let mut out = Span::Empty;
         ::std::mem::swap(self, &mut out);
@@ -212,6 +201,15 @@ impl Span {
         else if entries.len() == 1 { entries[0].clone() }
         else { Span::Successive(entries.iter().cloned().collect()) }
     }
+    pub fn is_whitespace(&self) -> bool {
+        if let Span::Whitespace | Span::LineBreak = self { true } else { false }
+    }
+    pub fn is_symbol(&self, s: char) -> bool {
+        if let Span::Symbol(c,_) = self { *c == s } else { false }
+    }
+    pub fn is_ident(&self, s: &str) -> bool {
+        if let Span::Ident(c) = self { c.data == s } else { false }
+    }
     pub fn ident(data: String, length: u32, start: Location) -> Self {
         Span::Ident(SpanData { data, start, length })
     }
@@ -231,10 +229,10 @@ impl Span {
     pub fn number_error(length: u32, start: Location) -> Self {
         Span::NumberError(SpanData { data: (), start, length })
     }
-    pub fn whitespace(start: Location) -> Self {
+    pub fn whitespace() -> Self {
         Span::Whitespace
     }
-    pub fn line_break(start: Location) -> Self {
+    pub fn line_break() -> Self {
         Span::LineBreak
     }
     pub fn pos_label(data: usize, length: u32, start: Location) -> Self {
@@ -249,22 +247,12 @@ impl Span {
     pub fn string(data: String, length: u32, start: Location) -> Self {
         Span::String(SpanData { data, start, length })
     }
-    pub fn is_whitespace(&self) -> bool {
-        if let Span::Whitespace | Span::LineBreak = self { true } else { false }
-    }
-    pub fn is_symbol(&self, s: char) -> bool {
-        if let Span::Symbol(c,_) = self { *c == s } else { false }
-    }
-    pub fn is_ident(&self, s: &str) -> bool {
-        if let Span::Ident(c) = self { c.data == s } else { false }
-    }
 }
 
 
 impl<R: Iterator<Item=char>> Iterator for LexerInner<R> {
     type Item = Span;
     fn next(&mut self) -> Option<Span> {
-        //println!("{:?}", self);
         let iter = &mut self.0;
         let start = iter.location();
         match iter.peek()? {
@@ -290,6 +278,10 @@ impl<R: Iterator<Item=char>> Iterator for LexerInner<R> {
             },
             '$' => {        // hex number
                 iter.next();
+                if let Some('0'...'9') | Some('A' ... 'F') | Some('a' ... 'f') = iter.peek() {} else {
+                    // if there is no number after this, it's a regular symbol (for variables, etc.)
+                    return Some(Span::symbol('$', start));
+                }
                 let mut buf = 0;
                 while let Some('0' ... '9') | Some('A' ... 'F') | Some('a' ... 'f') = iter.peek() {
                     buf = buf * 16 + iter.next()?.to_digit(16)? as i32;
@@ -346,9 +338,9 @@ impl<R: Iterator<Item=char>> Iterator for LexerInner<R> {
                         '\n' => is_nl = true,
                         ';' => is_comment = true,
                         _ => return Some(if is_nl {
-                            Span::line_break(start)
+                            Span::line_break()
                         } else {
-                            Span::whitespace(start)
+                            Span::whitespace()
                         })
                     }
                     iter.next();

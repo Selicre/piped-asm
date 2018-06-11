@@ -13,44 +13,25 @@ Start:
 
 	LDA #%10000000	; turn screen off, activate vblank
 	STA $2100
+	REP #$10		; turn XY 16-bit
 
-	REP #$20		; turn A 16-bit
+	BRA +
+.data
+	db $01
+	dl Graphics01
+	dw $0000, $4000
+	db $00
+	dl Palette
+	dw $0000, $0080
+	db $01
+	dl BGTilemap01
+	dw $4000, $2000
+	db $FF
 
-	LDA.w #Graphics01
-	STA $00
-	LDY.b #Graphics01>>16
-	STY $02
-	LDA #$0000
-	STA $03
-	LDA #$4000
-	STA $05
-	LDY #1
-	STY $07
-	JSR LoadData
-	LDA.w #Palette
-	STA $00
-	LDY.b #Palette>>16
-	STY $02
-	LDA #$0000
-	STA $03
-	LDA #$0080
-	STA $05
-	LDY #0
-	STY $07
-	JSR LoadData
-	LDA.w #BGTilemap01
-	STA $00
-	LDY.b #BGTilemap01>>16
-	STY $02
-	LDA #$4000
-	STA $03
-	LDA #$2000
-	STA $05
-	LDY #1
-	STY $07
-	JSR LoadData
-	SEP #$20		; turn A 8-bit
-	
++	LDX.w #.data
+	JSL LoadDataQueue
+	SEP #$10		; turn XY 8-bit
+
 	LDA #%00000010 ; bg mode 1, 8x8 tiles
 	STA $2105
 
@@ -148,7 +129,60 @@ IRQ:
 	CMP $4211	; Dummy read
 	JMP ($0080)
 
-
+; DMA queue
+; Loads a queue from the first bank. Uses the accumulator as the data pointer.
+; Format:
+; OP AA AA AA BB BB SS SS
+; OP: $00 - load into VRAM
+;     $01 - load into CGRAM
+;     $FF - quit
+LoadDataQueue:
+	PHP
+	PHA
+	PHY
+	SEP #$20	; 8-bit A
+.loop:
+	LDA $00,x	; offset $01: command
+	BMI .end	; if $FF, end
+	LDY $01,x	; A bus address
+	STY $4302
+	LDA $03,x
+	STA $4304
+	LDY $06,x	; Write size
+	STY $4305
+	LDY $00,x
+	BEQ .loadCGRAM
+.loadVRAM:
+	LDY $04,x	; B bus address
+	STY $2116
+	LDA #$80	; Video port control
+	STA $2115
+	LDA #$01	; Word increment mode
+	STA $4300
+	LDA #$18	; Destination: VRAM
+	STA $4301
+	BRA .startDMA
+.loadCGRAM:
+	LDA $04,x	; B bus address in CGRAM
+	STA $2121
+	LDA #%00000000
+	STA $4300	; 1 byte increment
+	LDA #$22	; Destination: CGRAM
+	STA $4301
+.startDMA:
+	LDA #$01	; Turn on DMA
+	STA $420B
+	REP #$20
+	TXA
+	CLC : ADC #$0008
+	TAX
+	SEP #$20
+	BRA .loop	; Loop again
+.end:
+	PLY
+	PLA
+	PLP
+	RTS
 
 ; Scratch RAM arguments:
 ; AA AA AA BB BB SS SS CC

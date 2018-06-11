@@ -1,14 +1,11 @@
-use std::collections::VecDeque;
-use std::ops;
-use std::cell::Cell;
 use std::fmt;
-use std::io::{self,Write};
+use std::io::{self,prelude::*,BufReader};
 
-use lexer::{Span,SpanData};
+use lexer::Span;
 
 use instructions::SizeHint;
 
-use expression::{Expression,ExprNode,ExprError};
+use expression::{Expression,ExprError};
 
 use compiler::CompilerState;
 
@@ -162,6 +159,10 @@ pub enum Statement {
         data: Vec<u8>,
         pending_exprs: Vec<(usize,Expression)>
     },
+    Define {
+        label: Span,
+        expr: Expression
+    },
     Error(ParseError)
 }
 
@@ -170,8 +171,8 @@ impl fmt::Display for Statement {
         use self::Statement::*;
         match self {
             Label { name, .. } => write!(f, "Label {}", name),
-            LocalLabel { depth, name } => write!(f, "Local label {}", name),
-            Instruction { name, size, arg, .. } => write!(f, "Instruction: {} {}", name, arg),
+            LocalLabel { name, .. } => write!(f, "Local label {}", name),
+            Instruction { name, arg, .. } => write!(f, "Instruction: {} {}", name, arg),
             RawData { data, .. } => {
                 write!(f, "Raw data: ")?;
                 for i in data { write!(f, "{:02X} ", i)? }
@@ -185,7 +186,6 @@ impl fmt::Display for Statement {
 
 #[derive(Debug)]
 pub enum ParseError {
-    UnknownSpan,
     ExprError(ExprError),
     MalformedHexString(Span),
     UnknownCommand(Vec<Span>),
@@ -219,11 +219,10 @@ pub struct Parser<S> {
     // todo: do this properly
     incsrc: Option<Box<Iterator<Item=Statement>>>,
     state: CompilerState,
-    buf: Vec<Span>
 }
 impl<S: Iterator<Item=Span>> Parser<S> {
     pub fn new(iter: S, state: CompilerState) -> Self {
-        Self { iter, state, incsrc: None, buf: Default::default() }
+        Self { iter, state, incsrc: None }
     }
 }
 impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
@@ -263,6 +262,13 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                 [ref mut name @ Ident(_), Symbol(':',_)] |
                 [ref mut name @ PosLabel(_)] | [ref mut name @ NegLabel(_)] =>
                     Label { attrs, name: name.take() },
+                [ref mut define, Whitespace, ref mut label @ Ident(_), ref mut rest.., ref mut c]
+                    if define.is_ident("define") && (*c == Span::LineBreak || c.is_symbol(':')) => {
+                    Define {
+                        label: label.take(),
+                        expr: Expression::parse(&rest, &mut state.borrow_mut().lls).map_err(ParseError::ExprError)?
+                    }
+                },
                 // closure below is a workaround
                 [ref mut dots.., ref mut name @ Ident(_), Whitespace] |
                 [ref mut dots.., ref mut name @ Ident(_), LineBreak] |
@@ -270,7 +276,6 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                     if (|| dots.len() > 0 && dots.iter().all(|c| if let Symbol('.',_) = c { true } else { false }))() =>
                         LocalLabel { depth: dots.len() - 1, name: name.take() },
                 [Ident(ref mut c), Whitespace, Span::String(ref mut filename), LineBreak] if c.data == "incsrc" => {
-                    use std::io::{self,prelude::*,BufReader};
                     use std::fs::File;
                     use lexer::Lexer;
                     let state = state.clone();
@@ -318,7 +323,6 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                         _ => unreachable!()
                     };
                     let mut dbuf = Vec::new();
-                    let mut allow_comma = false;
                     let mut pending_exprs = Vec::new();
                     for i in rest.split(|c| c.is_symbol(',')) {
                         let mut expr = Expression::parse(&i, &mut state.borrow_mut().lls).map_err(ParseError::ExprError)?;
@@ -360,7 +364,7 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                     => Instruction {
                     attrs,
                     name: name.take(),
-                    size: (SizeHint::parse(size.as_ident().unwrap()).ok_or(ParseError::GenericSyntaxError)?, Some(size.take())),
+                    size: (SizeHint::parse(size.as_ident().unwrap()).ok_or(ParseError::InvalidOpSize(size.clone()))?, Some(size.take())),
                     arg: Argument::parse(rest, state)?
                 },
                 [Symbol('#',_), Symbol('[',_), ref rest.., Symbol(']',_)] => {

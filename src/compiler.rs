@@ -8,7 +8,7 @@ use std::cell::RefCell;
 
 use lexer::{Lexer,Span,SpanData};
 
-use parser::{Parser,Statement};
+use parser::{Parser,Statement,ParseError};
 use instructions;
 use instructions::Instruction as SInstruction;
 use instructions::SizeHint;
@@ -16,58 +16,37 @@ use instructions::SizeHint;
 use addrmodes::AddressingMode;
 
 use byteorder::LittleEndian;
-use std::io::Write;
 use byteorder::WriteBytesExt;
 
 use expression::{Expression,ExprNode,LocalLabelState};
 
 use attributes::Attribute;
 
-struct CompilerContext {
-    local: CtxInner,
-    global: CtxInner
-}
-
-#[derive(Default)]
-struct CtxInner {
-    a_size: Option<bool>,    // false: 8-bit, true: 16-bit
-    xy_size: Option<bool>,
-}
 #[derive(Debug)]
 pub enum CompileError {
-    
-}
-/*
-// Intermediate struct to build a LabeledChunk.
-struct LabeledChunkBuilder {
-    data: Vec<u8>,
-    // [n] => depth 1-n, Stores the offset of negative label to jump to it.
-    neg_labels: Vec<usize>,
-    // [n] => depth n-1, Stores the offset of every instruction to overwrite with
-    pos_labels: Vec<Vec<usize>>,
-    local_labels: Vec<usize>,
+    ParseError(ParseError)
 }
 
-
-impl LabeledChunkBuilder {
-    pub fn feed(self, stmt: Statement) -> Result<Self,CompileError> {
-        match stmt {
-            Label {} => panic!("compiler broke: can't feed a Label to a LabeledChunkBuilder")
-        }
-    }
-}*/
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct LabelRef {
     pub offset: usize,
-    pub size: SizeHint,
-    pub label: String
+    pub expr: Expression,
+    // Enforce that the referenced label is placed in the same bank.
+    pub same_bank: bool
+}
+
+#[derive(Debug)]
+pub enum CompileData {
+    Chunk { label: String, chunk: LabeledChunk },
+    Define { label: String, expr: Expression },
+    Error(CompileError),
 }
 
 // TODO: (de)serialize a hashmap of this
 #[derive(Default, Debug)]
 pub struct LabeledChunk {
     pub data: Vec<u8>,
-    pub pending_exprs: Vec<(usize, Expression)>,
+    pub pending_exprs: Vec<LabelRef>,
     pub attrs: Vec<Attribute>,
     pub diverging: bool,
     pub bank_hint: Option<u8>
@@ -83,7 +62,7 @@ impl LabeledChunk {
             bank_hint
         }
     }
-    pub fn pin(&self, addr: u16) {
+    pub fn pin(&self, _addr: u16) {
         // TODO: ability to pin chunks to concrete addresses
     }
     pub fn get_data(&self) -> &[u8] {
@@ -122,6 +101,7 @@ pub struct Compiler {
     state: CompilerState,
     // fix?
     inner: Box<Iterator<Item=Statement>>,
+    extra: Vec<CompileData>,
     next_label: Option<SpanData<String>>,
     next_attrs: Vec<Attribute>
 }
@@ -133,42 +113,45 @@ impl Compiler {
         let state = CompilerState::default();
         let file = match filename {
             "-" => Box::new(io::stdin()) as Box<Read>,
-            c => Box::new(File::open(filename)?)
+            c => Box::new(File::open(c)?)
         };
         let file = BufReader::new(file);
         let lexed = Lexer::new(filename.to_string(), file.chars().map(|c| c.unwrap()));
         let inner = Box::new(Parser::new(lexed, state.clone()));
-        Ok(Self { inner, state, next_attrs: Vec::new(), next_label: Some(SpanData::create("*root".to_string())) })
+        Ok(Self { inner, state, extra: Vec::new(), next_attrs: Vec::new(), next_label: Some(SpanData::create("*root".to_string())) })
     }
-    fn res_next(&mut self) -> Result<Option<(String, LabeledChunk)>,CompileError> {
+    fn res_next(&mut self) -> Result<Option<CompileData>,CompileError> {
         use self::Statement::*;
+        if self.extra.len() > 0 {
+            return Ok(self.extra.pop())
+        }
         let mut chunk = LabeledChunk::default();
 
         // label name -> offset
         let mut labels: HashMap<ExprNode, usize> = HashMap::new();
         // all the places where it should be replaced
-        let mut pending_exprs: Vec<(usize, Expression)> = Vec::new();
+        let mut pending_exprs = Vec::new();
         // This function calculates all expressions that can be reduced (usually ones with local
         // labels), and if it ends up being a constant, it replaces the part in the chunk with that
         // constant.
-        fn merge_labels(chunk: &mut LabeledChunk, labels: &HashMap<ExprNode, usize>, pending_exprs: Vec<(usize, Expression)>) {
-            use std::io::{Cursor, Write, Seek, SeekFrom};
+        fn merge_labels(chunk: &mut LabeledChunk, labels: &HashMap<ExprNode, usize>, pending_exprs: Vec<LabelRef>) {
+            use std::io::{Cursor, Seek, SeekFrom};
             let mut cursor = Cursor::new(&mut chunk.data);
             let mut linker_exprs = Vec::new();
-            for (offset, mut expr) in pending_exprs.into_iter() {
-                use self::ExprNode::*;
-                expr.each_mut(|c| {
+            for mut r in pending_exprs.into_iter() {
+                let offset = r.offset;
+                r.expr.each_mut(|c| {
                     *c = ExprNode::LabelOffset(match labels.get(c) {
                         Some(&c) => c as isize,
                         None => return
                     });
                 });
-                expr.reduce();
-                match expr.root {
+                r.expr.reduce();
+                match r.expr.root {
                     ExprNode::Empty => {},
                     ExprNode::Constant(c) => {
                         cursor.seek(SeekFrom::Start(offset as u64)).unwrap();
-                        match expr.size {
+                        match r.expr.size {
                             SizeHint::RelByte | SizeHint::RelWord => panic!("This doesn't make any sense."),
                             SizeHint::Byte => cursor.write_u8(c as u8).unwrap(),
                             SizeHint::Word => cursor.write_u16::<LittleEndian>(c as u16).unwrap(),
@@ -178,13 +161,13 @@ impl Compiler {
                     },
                     ExprNode::LabelOffset(c) => {
                         cursor.seek(SeekFrom::Start(offset as u64)).unwrap();
-                        match expr.size {
+                        match r.expr.size {
                             SizeHint::RelByte => cursor.write_i8((c as i32 - offset as i32 - 1) as i8).unwrap(),
                             SizeHint::RelWord => cursor.write_i16::<LittleEndian>((c as i32 - offset as i32 - 1) as i16).unwrap(),
-                            s => linker_exprs.push((offset, expr)),
+                            _ => linker_exprs.push(r),
                         }
                     },
-                    _ => linker_exprs.push((offset, expr))
+                    _ => linker_exprs.push(r)
                 }
             }
             chunk.pending_exprs = linker_exprs;
@@ -196,12 +179,14 @@ impl Compiler {
                     None => Ok(None),
                     Some(c) => {
                         merge_labels(&mut chunk, &labels, pending_exprs);
-                        Ok(Some((c.data, chunk)))
+                        Ok(Some(CompileData::Chunk { label: c.data, chunk }))
                     }
                 }
             };
-
             match c {
+                Statement::Define { label, expr } => {
+                    self.extra.push(CompileData::Define { label: label.as_ident().unwrap().to_string(), expr });
+                },
                 // Split here
                 Label { name: Span::Ident(mut name), mut attrs } => {
                     merge_labels(&mut chunk, &labels, pending_exprs);
@@ -212,7 +197,7 @@ impl Compiler {
                         _ => {}
                     } }
                     chunk.attrs = attrs;
-                    return Ok(Some((name.data, chunk)));
+                    return Ok(Some(CompileData::Chunk { label: name.data, chunk }));
                 },
                 // TODO: move this to the parser? Maybe? It's a bit split rn
                 Label { name: Span::NegLabel(c), .. } => {
@@ -237,10 +222,10 @@ impl Compiler {
                     chunk.diverging = true;
                     use std::io::Write;
                     let len = chunk.data.len();
-                    pending_exprs.extend(p.into_iter().map(|(off, expr)| (len+off, expr)));
+                    pending_exprs.extend(p.into_iter().map(|(off, expr)| LabelRef { offset: len+off, expr, same_bank: false }));
                     chunk.data.write(&data).unwrap();
                 },
-                Instruction { attrs, name, size, arg } => {
+                Instruction { name, size, arg, .. } => {
                     // TODO: check for modification of compiler context (e.g. static size
                     // checking)
                     use self::ExprNode::*;
@@ -260,7 +245,7 @@ impl Compiler {
                     if !const_only {
                         let mut new_expr = arg.expr.clone();
                         new_expr.size = s;
-                        pending_exprs.push((chunk.data.len()+1, new_expr));
+                        pending_exprs.push(LabelRef { offset: chunk.data.len()+1, expr: new_expr, same_bank: true });
                     }
                     let arg = AddressingMode::parse(arg, s).map_err(|_| { print!("wrong addressing mode {:?}", name); panic!() })?;
                     let instr = SInstruction::new(name.as_ident().unwrap(), arg);
@@ -280,12 +265,12 @@ impl Compiler {
 }
 
 impl Iterator for Compiler {
-    type Item = Result<(String, LabeledChunk),CompileError>;
+    type Item = CompileData;
     fn next(&mut self) -> Option<Self::Item> {
         match self.res_next() {
-            Ok(Some(c)) => Some(Ok(c)),
+            Ok(Some(c)) => Some(c),
             Ok(None) => None,
-            Err(e) => Some(Err(e))
+            Err(e) => Some(CompileData::Error(e))
         }
     }
 }

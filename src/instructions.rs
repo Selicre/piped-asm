@@ -1,8 +1,3 @@
-use byteorder::ByteOrder;
-use parser::{Statement, Argument};
-use parser::ParseError;
-use lexer::Span;
-use lexer::SpanData;
 use addrmodes::AddressingMode;
 use std::io::{self, Write};
 
@@ -129,7 +124,7 @@ impl Instruction {
     }
     pub fn is_diverging(&self) -> bool {
         match &*self.name {
-            "JMP" | "JML" | "BRA" | "BRL" | "RTS" | "RTL" => true,
+            "JMP" | "JML" | "BRA" | "BRL" | "RTS" | "RTL" | "RTI" => true,
             _ => false
         }
     }
@@ -142,7 +137,7 @@ impl Instruction {
                 arg.write_to(w).map_err(CompileError::WriteError)?;
             }};
             (@rep $arg:expr, $opcode:expr) => {{
-                for i in 0..$arg {
+                for _ in 0..$arg {
                     w.write_all(&[$opcode]).map_err(CompileError::WriteError)?;
                 }
             }}
