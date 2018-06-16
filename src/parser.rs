@@ -1,17 +1,14 @@
 use std::fmt;
 use std::io::{self,prelude::*,BufReader};
+use std::iter::Peekable;
 
-use lexer::Span;
-
+use lexer::{Span,SpanData};
 use instructions::SizeHint;
-
-use expression::{Expression,ExprError};
-
+use expression::{Expression,ExprNode,ExprError};
 use compiler::CompilerState;
-
 use byteorder::{WriteBytesExt,LittleEndian};
-
 use attributes::{Attribute,AttributeError};
+use n_peek::NPeekable;
 
 #[derive(Debug, PartialEq)]
 pub enum ArgumentKind {
@@ -163,6 +160,7 @@ pub enum Statement {
         label: Span,
         expr: Expression
     },
+    Nothing,
     Error(ParseError)
 }
 
@@ -178,7 +176,7 @@ impl fmt::Display for Statement {
                 for i in data { write!(f, "{:02X} ", i)? }
                 Ok(())
             },
-            _ => write!(f, "Unimplemented!")
+            c => write!(f, "{:?}", c)
         }
     }
 }
@@ -194,7 +192,8 @@ pub enum ParseError {
     UnknownAddressingMode(Span),
     IO(io::Error),
     UnexpectedSymbol(Span),
-    AttributeError(AttributeError)
+    AttributeError(AttributeError),
+    UnexpectedEOF(String),
 }
 
 // obviously TODO
@@ -213,18 +212,154 @@ impl fmt::Display for ParseError {
         }
     }
 }
-
-pub struct Parser<S> {
-    iter: S,
-    // todo: do this properly
+use std::option::NoneError;
+impl From<NoneError> for ParseError {
+    fn from(f: NoneError) -> ParseError {
+        ParseError::UnexpectedEOF(String::new())
+    }
+}
+pub struct Parser<S: Iterator> {
+    iter: NPeekable<S>,
     incsrc: Option<Box<Iterator<Item=Statement>>>,
     state: CompilerState,
 }
 impl<S: Iterator<Item=Span>> Parser<S> {
     pub fn new(iter: S, state: CompilerState) -> Self {
-        Self { iter, state, incsrc: None }
+        Self { iter: NPeekable::new(iter), state, incsrc: None }
+    }
+    // .next() but skip whitespace
+    fn skip_wsp(&mut self) -> Option<Span> {
+        self.iter.by_ref().filter(|c| !c.is_whitespace()).next()
+    }
+    fn define(&mut self) -> Result<Statement, ParseError> {
+        use self::Span::*;
+        let label = self.iter.next()?;
+        if !label.as_ident().is_some() { return Err(ParseError::GenericSyntaxError) }
+        let buf = self.iter.by_ref()
+            .take_while(|c| c != &LineBreak && !c.is_symbol(':'))
+            .filter(|c| c != &Whitespace)
+            .collect::<Vec<_>>();
+        Ok(Statement::Define {
+            label,
+            expr: Expression::parse(&buf, &mut self.state.borrow_mut().lls).map_err(ParseError::ExprError)?
+        })
+    }
+    fn incsrc(&mut self, attrs: &Vec<Attribute>) -> Result<Option<Statement>,ParseError> {
+        use self::Span::*;
+        use self::Statement::*;
+        use std::fs::File;
+        use lexer::Lexer;
+        let state = self.state.clone();
+        let filename = self.skip_wsp()?.as_string().ok_or(ParseError::GenericSyntaxError)?;
+        let file = File::open(&filename).map_err(ParseError::IO)?;
+        let file = BufReader::new(file);
+        let chars = file.chars().map(|c| c.unwrap());
+        let lexed = Box::new(Lexer::new(filename.to_string(), chars)) as Box<Iterator<Item=_>>;
+        let mut parsed = Box::new(Parser::new(lexed, state));
+        let first_stmt = parsed.next();
+        self.incsrc = Some(parsed);
+        Ok(first_stmt)
+    }
+    fn incbin(&mut self) -> Result<Statement,ParseError> {
+        use std::fs::File;
+        use std::io::Read;
+        let filename = self.skip_wsp()?.as_string().ok_or(ParseError::GenericSyntaxError)?;
+        let mut data = Vec::new();
+        File::open(&filename).map_err(ParseError::IO)?.read_to_end(&mut data).map_err(ParseError::IO)?;
+        Ok(Statement::RawData {
+            data,
+            pending_exprs: vec![]
+        })
+    }
+    fn inline_data(&mut self, attrs: Vec<Attribute>, size: SizeHint) -> Result<Statement,ParseError> {
+        use self::Span::*;
+        use self::Statement::*;
+        let iter = &mut self.iter;
+        // todo: remove this
+        let buf = iter.by_ref()
+            .take_while(|c| c != &LineBreak && !c.is_symbol(':'))
+            .filter(|c| c != &Whitespace)
+            .collect::<Vec<_>>();
+        let mut dbuf = Vec::with_capacity(16);
+        let mut pending_exprs = Vec::new();
+        for i in buf.split(|c| c.is_symbol(',')) {
+            let mut expr = Expression::parse(&i, &mut self.state.borrow_mut().lls).map_err(ParseError::ExprError)?;
+            // db "thing"
+            if let ExprNode::Str(s) = expr.root {
+                dbuf.write(s.as_bytes()).unwrap();
+                continue
+            }
+            let data = if let Some(c) = expr.is_const() {
+                c
+            } else {
+                expr.with_size(size);
+                pending_exprs.push((dbuf.len(), expr));
+                0
+            };
+            match size {
+                SizeHint::Byte => dbuf.write_u8(data as u8).unwrap(),
+                SizeHint::Word => dbuf.write_u16::<LittleEndian>(data as u16).unwrap(),
+                SizeHint::Long => dbuf.write_u24::<LittleEndian>(data as u32).unwrap(),
+                _ => unreachable!()
+            }
+        }
+        Ok(RawData {
+            data: dbuf,
+            pending_exprs
+        })
+    }
+    fn inline_hex_data(&mut self, attrs: Vec<Attribute>) -> Result<Statement,ParseError> {
+        use self::Span::*;
+        use self::Statement::*;
+        let data = self.skip_wsp()?;
+        let d = &if let String(ref d) = data { d } else { return Err(ParseError::GenericSyntaxError) }.data;
+        if d.len() % 2 != 0 { return Err(ParseError::MalformedHexString(data)); }
+        let buf = d.as_bytes().chunks(2).map(|c| {
+            Some(((c[1] as char).to_digit(16)?
+                + (c[0] as char).to_digit(16)? * 16) as u8)
+        }).collect::<Option<_>>()
+            .ok_or(ParseError::MalformedHexString(data.clone()))?;
+        Ok(RawData {
+            data: buf,
+            pending_exprs: vec![]
+        })
+    }
+    fn instruction(&mut self, attrs: Vec<Attribute>, id1: SpanData<String>) -> Result<Statement,ParseError> {
+        use self::Span::*;
+        use self::Statement::*;
+        let iter = &mut self.iter;
+        let mut size_hint = None;
+        match iter.peek(0) {
+            // add a ".w" size hint
+            Some(Symbol('.',_)) => {
+                iter.next()?;
+                let size = iter.next()?;
+                let size_p = size.as_ident()
+                    .and_then(SizeHint::parse)
+                    .ok_or(ParseError::InvalidOpSize(size.clone()))?;
+                size_hint = Some((size_p, Some(size)))
+            },
+            _ => {}
+        }
+        // Note: in the future, there will be no `.collect()`
+        let buf = iter.by_ref()
+            .take_while(|c| c != &LineBreak && !c.is_symbol(':'))
+            .filter(|c| c != &Whitespace)
+            .collect::<Vec<_>>();
+        let arg = if buf.len() > 0 {
+            Argument::parse(&buf, &self.state)?
+        } else {
+            Argument::implied()
+        };
+        let c = Instruction {
+            name: Ident(id1), attrs, size: size_hint.unwrap_or_default(), arg
+        };
+        Ok(c)
     }
 }
+
+
+
 impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
     type Item = Statement;
     fn next(&mut self) -> Option<Statement> {
@@ -236,150 +371,68 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
         }
         use self::Span::*;
         use self::Statement::*;
-        let mut buf = Vec::new();
         let mut attrs = Vec::new();
-        let iter = &mut self.iter;
-        let state = &self.state;
-        let incsrc = &mut self.incsrc;
-        let mut clear = false;
-        let res = (|| loop {
-            if clear {
-                buf.clear();
-                clear = false;
-            }
-            let c = if let Some(c) = iter.next() { c } else {
-                // The stream has ended but we can't parse the end
-                if buf.len() > 0 {
-                    return Err(ParseError::GenericSyntaxError)
-                } else {
-                    return Ok(None)
-                }
-            };
-            buf.push(c);
-            // TODO: this entire thing should be replaced with a proper parser tree.
-            return Ok(Some(match &mut *buf {
-                // Label:
-                [ref mut name @ Ident(_), Symbol(':',_)] |
-                [ref mut name @ PosLabel(_)] | [ref mut name @ NegLabel(_)] =>
-                    Label { attrs, name: name.take() },
-                [ref mut define, Whitespace, ref mut label @ Ident(_), ref mut rest.., ref mut c]
-                    if define.is_ident("define") && (*c == Span::LineBreak || c.is_symbol(':')) => {
-                    Define {
-                        label: label.take(),
-                        expr: Expression::parse(&rest, &mut state.borrow_mut().lls).map_err(ParseError::ExprError)?
-                    }
-                },
-                // closure below is a workaround
-                [ref mut dots.., ref mut name @ Ident(_), Whitespace] |
-                [ref mut dots.., ref mut name @ Ident(_), LineBreak] |
-                [ref mut dots.., ref mut name @ Ident(_), Symbol(':',_)]
-                    if (|| dots.len() > 0 && dots.iter().all(|c| if let Symbol('.',_) = c { true } else { false }))() =>
-                        LocalLabel { depth: dots.len() - 1, name: name.take() },
-                [Ident(ref mut c), Whitespace, Span::String(ref mut filename), LineBreak] if c.data == "incsrc" => {
-                    use std::fs::File;
-                    use lexer::Lexer;
-                    let state = state.clone();
-                    let file = File::open(&filename.data).map_err(ParseError::IO)?;
-                    let file = BufReader::new(file);
-                    // no idea why a box is needed here
-                    let chars = file.chars().map(|c| c.unwrap());
-                    let lexed = Box::new(Lexer::new(filename.data.clone(), chars)) as Box<Iterator<Item=_>>;
-                    let mut parsed = Box::new(Parser::new(lexed, state));
-                    let first_stmt = parsed.next();
-                    *incsrc = Some(parsed);
-                    match first_stmt {
-                        Some(c) => c,
-                        None => { clear = true; continue }
-                    }
-                },
-                [Ident(ref c), Whitespace, Span::String(ref name), LineBreak] if c.data == "incbin" => RawData {
-                    data: {
-                        use std::fs::File;
-                        use std::io::Read;
-                        let mut c = Vec::new();
-                        File::open(&name.data).map_err(ParseError::IO)?.read_to_end(&mut c).map_err(ParseError::IO)?;
-                        c
-                    },
-                    pending_exprs: vec![]
-                },
-                [Ident(ref c), Whitespace, String(ref s), LineBreak] if c.data == "ds" => RawData {
-                    data: s.data.as_bytes().to_vec(),
-                    pending_exprs: vec![]
-                },
-                [Ident(ref c), Whitespace, String(ref s), LineBreak] if c.data == "dbx" => RawData {
-                    data: {
-                        if s.data.len() % 2 != 0 { return Err(ParseError::MalformedHexString(String(s.clone()))); }
-                        s.data.as_bytes().chunks(2).map(|c| {
-                            Some(((c[1] as char).to_digit(16)? + (c[0] as char).to_digit(16)? * 16) as u8)
-                        }).collect::<Option<_>>().ok_or(ParseError::MalformedHexString(String(s.clone())))?
-                    },
-                    pending_exprs: vec![]
-                },
-                [Ident(ref c), ref rest.., LineBreak] if c.data == "db" || c.data == "dw" || c.data == "dl" => {
-                    let size = match &*c.data {
-                        "db" => SizeHint::Byte,
-                        "dw" => SizeHint::Word,
-                        "dl" => SizeHint::Long,
-                        _ => unreachable!()
-                    };
-                    let mut dbuf = Vec::new();
-                    let mut pending_exprs = Vec::new();
-                    for i in rest.split(|c| c.is_symbol(',')) {
-                        let mut expr = Expression::parse(&i, &mut state.borrow_mut().lls).map_err(ParseError::ExprError)?;
-                        let data = if let Some(c) = expr.is_const() {
-                            c
-                        } else {
-                            expr.with_size(size);
-                            pending_exprs.push((dbuf.len(), expr));
-                            0
-                        };
-                        match size {
-                            SizeHint::Byte => dbuf.write_u8(data as u8).unwrap(),
-                            SizeHint::Word => dbuf.write_u16::<LittleEndian>(data as u16).unwrap(),
-                            SizeHint::Long => dbuf.write_u24::<LittleEndian>(data as u32).unwrap(),
-                            _ => unreachable!()
+        let res = (|| {
+            // loop allows the use of "continue"
+            loop {
+                let first = match self.skip_wsp() {
+                    Some(c) => c,
+                    None => return Ok(None)
+                };
+                return Ok(Some(match first {
+                Ident(id1) => match self.iter.peek(0)? {
+                    Symbol(':',_) => {
+                        self.iter.next();
+                        Label {
+                            attrs, name: Ident(id1)
                         }
+                    },
+                    _ => match &*id1.data {
+                        "define" => self.define()?,
+                        "incsrc" => match self.incsrc(&attrs)? {
+                            Some(c) => c,
+                            None => continue
+                        },
+                        "incbin" => self.incbin()?,
+                        "db" => self.inline_data(attrs, SizeHint::Byte)?,
+                        "dw" => self.inline_data(attrs, SizeHint::Word)?,
+                        "dl" => self.inline_data(attrs, SizeHint::Long)?,
+                        "dbx" => self.inline_hex_data(attrs)?,
+                        _ => self.instruction(attrs, id1)?
                     }
-                    RawData {
-                        data: dbuf,
-                        pending_exprs
+                },
+                Symbol('.',_) => {
+                    let iter = &mut self.iter;
+                    let mut depth = 0;
+                    while iter.peek(0)?.is_symbol('.') { depth += 1; iter.next(); }
+                    let name = iter.next()?;
+                    // skip ending ':'
+                    if iter.peek(0).map(|c| c.is_symbol(':')).unwrap_or(false) { iter.next(); }
+                    LocalLabel { depth, name }
+                },
+                name @ PosLabel(_) | name @ NegLabel(_) => {
+                    let iter = &mut self.iter;
+                    // Allow for +: and -:, same as asar
+                    if iter.peek(0).map(|c| c.is_symbol(':')).unwrap_or(false) { iter.next(); }
+                    Label {
+                        attrs, name
                     }
                 },
-                [ref mut name @ Ident(_), LineBreak] |
-                [ref mut name @ Ident(_), Whitespace, Symbol(':',_)] => Instruction {
-                    attrs,
-                    name: name.take(),
-                    size: Default::default(),
-                    arg: Argument::implied()
-                },
-                [ref mut name @ Ident(_), Whitespace, ref mut rest.., LineBreak] |
-                [ref mut name @ Ident(_), Whitespace, ref mut rest.., Whitespace, Symbol(':',_)] => Instruction {
-                    attrs,
-                    name: name.take(),
-                    size: Default::default(),
-                    arg: Argument::parse(rest, state)?
-                },
-                [ref mut name @ Ident(_), Symbol('.',_), ref mut size @ Ident(_), Whitespace, ref mut rest.., LineBreak] |
-                [ref mut name @ Ident(_), Symbol('.',_), ref mut size @ Ident(_), Whitespace, ref mut rest.., Whitespace, Symbol(':',_)]
-                    => Instruction {
-                    attrs,
-                    name: name.take(),
-                    size: (SizeHint::parse(size.as_ident().unwrap()).ok_or(ParseError::InvalidOpSize(size.clone()))?, Some(size.take())),
-                    arg: Argument::parse(rest, state)?
-                },
-                [Symbol('#',_), Symbol('[',_), ref rest.., Symbol(']',_)] => {
-                    let c = rest.split(|c| c.is_symbol(','))
+                Symbol('#',_) => {
+                    let iter = &mut self.iter;
+                    if !iter.next()?.is_symbol('[') { println!("["); return Err(ParseError::GenericSyntaxError) }
+                    let buf = iter.by_ref()
+                        .take_while(|c| !c.is_symbol(']'))
+                        .collect::<Vec<_>>();
+                    let c = buf.split(|c| c.is_symbol(','))
                         .map(Attribute::from_span)
                         .collect::<Result<Vec<_>,_>>()
                         .map_err(ParseError::AttributeError)?;
                     attrs.extend(c);
-                    clear = true;
                     continue;
                 },
-                [Whitespace] | [LineBreak] => { clear = true; continue; },
-                [ref line.., LineBreak] => return Err(ParseError::UnknownCommand(line.to_vec())),
-                _ => continue
-            }));
+                c => { println!("c: {:?}", c); Nothing }
+            })) }
         })();
         match res {
             Ok(Some(c)) => Some(c),

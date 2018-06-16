@@ -171,6 +171,13 @@ impl Span {
             _ => None
         }
     }
+    pub fn as_string(self) -> Option<String> {
+        if let Span::String(s) = self {
+            Some(s.data)
+        } else {
+            None
+        }
+    }
     pub fn take(&mut self) -> Self {
         let mut out = Span::Empty;
         ::std::mem::swap(self, &mut out);

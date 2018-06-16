@@ -23,8 +23,8 @@ impl<I: Iterator> Iterator for NPeekable<I> {
 impl<I: Iterator> NPeekable<I> {
     // c.peek(0) == &c.next()
     pub fn peek(&mut self, offset: usize) -> Option<&I::Item> {
-        while offset < self.queue.len() {
-            let next = self.next()?;
+        while offset >= self.queue.len() {
+            let next = self.iter.next()?;
             self.queue.push(next);
         }
         Some(&self.queue[offset])
@@ -52,5 +52,20 @@ impl<'a, I: Iterator> NPeekableHandle<'a, I> {
         let mut swapped = Vec::new();
         mem::swap(&mut swapped, &mut self.reference.queue);
         swapped
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn thing() {
+        let c = vec![1,2,3,4];
+        let mut iter = NPeekable::new(c.into_iter());
+        assert_eq!(iter.next(), Some(1));
+        assert_eq!(iter.peek(0), Some(&2));
+        assert_eq!(iter.peek(1), Some(&3));
+        assert_eq!(iter.next(), Some(2));
+        assert_eq!(iter.next(), Some(3));
+        assert_eq!(iter.next(), Some(4));
     }
 }
