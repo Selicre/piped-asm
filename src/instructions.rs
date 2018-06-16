@@ -154,7 +154,12 @@ impl Instruction {
             ($($p:ident => $e:expr),*) => { match arg { $($p(_) => write!($e)),*, _ => return Err(CompileError::AddressMode) } };
         }
         macro_rules! move_mem {
-            ($e:expr) => { match arg { BlockMove(b1,b2) => write_block_move!($e, *b1, *b2), _ => return Err(CompileError::AddressMode) } }
+            ($e:expr) => {
+                match arg {
+                    ImmediateWord(arg) => write!($e),
+                    BlockMove(b1,b2) => write_block_move!($e, *b1, *b2), _ => return Err(CompileError::AddressMode)
+                }
+            }
         }
         macro_rules! implied {
             ($e:expr) => {
