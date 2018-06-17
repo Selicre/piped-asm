@@ -3,7 +3,6 @@
 
 // while development happens - don't wanna miss the important warns
 #![allow(unused_imports, dead_code, unused_variables, unreachable_code)]
-
 extern crate byteorder;
 extern crate linked_hash_map;
 
@@ -21,9 +20,11 @@ mod instructions;
 mod compiler;
 mod linker;
 mod expression;
+//mod expression_iter;
 mod attributes;
 mod colors;
 mod n_peek;
+mod lls;
 
 use compiler::Compiler;
 

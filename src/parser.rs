@@ -126,12 +126,14 @@ impl Argument {
             },
             _ => {}
         }
-        let expr = if kind == Direct && spans.len() >= 2 && spans[0].is_symbol('#') {
+        let spans = if kind == Direct && spans.len() >= 2 && spans[0].is_symbol('#') {
             kind = Constant;
-            Expression::parse(&spans[1..], &mut state.borrow_mut().lls).map_err(ParseError::ExprError)?
+            &spans[1..]
         } else {
-            Expression::parse(spans, &mut state.borrow_mut().lls).map_err(ParseError::ExprError)?
+            spans
         };
+        let iter = &mut NPeekable::new(spans.iter().filter(|c| !c.is_whitespace()).cloned());
+        let expr = Expression::parse(iter, &mut state.borrow_mut().lls).map_err(ParseError::ExprError)?;
         Ok(Argument { kind, expr })
     }
 }
@@ -191,6 +193,7 @@ pub enum ParseError {
     GenericSyntaxError,
     UnknownAddressingMode(Span),
     IO(io::Error),
+    Unexpected(Span, &'static str),
     UnexpectedSymbol(Span),
     AttributeError(AttributeError),
     UnexpectedEOF(String),
@@ -233,15 +236,14 @@ impl<S: Iterator<Item=Span>> Parser<S> {
     }
     fn define(&mut self) -> Result<Statement, ParseError> {
         use self::Span::*;
-        let label = self.iter.next()?;
-        if !label.as_ident().is_some() { return Err(ParseError::GenericSyntaxError) }
-        let buf = self.iter.by_ref()
+        let label = self.skip_wsp()?;
+        if !label.as_ident().is_some() { return Err(ParseError::Unexpected(label, "ident")) }
+        let iter = self.iter.by_ref()
             .take_while(|c| c != &LineBreak && !c.is_symbol(':'))
-            .filter(|c| c != &Whitespace)
-            .collect::<Vec<_>>();
+            .filter(|c| c != &Whitespace);
         Ok(Statement::Define {
             label,
-            expr: Expression::parse(&buf, &mut self.state.borrow_mut().lls).map_err(ParseError::ExprError)?
+            expr: Expression::parse(&mut NPeekable::new(iter), &mut self.state.borrow_mut().lls).map_err(ParseError::ExprError)?
         })
     }
     fn incsrc(&mut self, attrs: &Vec<Attribute>) -> Result<Option<Statement>,ParseError> {
@@ -253,8 +255,8 @@ impl<S: Iterator<Item=Span>> Parser<S> {
         let filename = self.skip_wsp()?.as_string().ok_or(ParseError::GenericSyntaxError)?;
         let file = File::open(&filename).map_err(ParseError::IO)?;
         let file = BufReader::new(file);
-        let chars = file.chars().map(|c| c.unwrap());
-        let lexed = Box::new(Lexer::new(filename.to_string(), chars)) as Box<Iterator<Item=_>>;
+        let chars = file.chars().map(Result::unwrap);
+        let lexed = Lexer::new(filename.to_string(), chars);
         let mut parsed = Box::new(Parser::new(lexed, state));
         let first_stmt = parsed.next();
         self.incsrc = Some(parsed);
@@ -274,16 +276,17 @@ impl<S: Iterator<Item=Span>> Parser<S> {
     fn inline_data(&mut self, attrs: Vec<Attribute>, size: SizeHint) -> Result<Statement,ParseError> {
         use self::Span::*;
         use self::Statement::*;
-        let iter = &mut self.iter;
-        // todo: remove this
-        let buf = iter.by_ref()
+        let mut expr_buf = self.iter.by_ref()
             .take_while(|c| c != &LineBreak && !c.is_symbol(':'))
-            .filter(|c| c != &Whitespace)
-            .collect::<Vec<_>>();
+            .filter(|c| c != &Whitespace);
         let mut dbuf = Vec::with_capacity(16);
         let mut pending_exprs = Vec::new();
-        for i in buf.split(|c| c.is_symbol(',')) {
-            let mut expr = Expression::parse(&i, &mut self.state.borrow_mut().lls).map_err(ParseError::ExprError)?;
+        loop {
+            // Did it encounter a comma or not? If not, this is the end of the thing
+            // Note: this probably can be implemented better
+            let mut has_comma = false;
+            let this_expr = expr_buf.by_ref().take_while(|c| if c.is_symbol(',') { has_comma = true; false } else { true });
+            let mut expr: Expression = Expression::parse(&mut NPeekable::new(this_expr), &mut self.state.borrow_mut().lls).map_err(ParseError::ExprError)?;
             // db "thing"
             if let ExprNode::Str(s) = expr.root {
                 dbuf.write(s.as_bytes()).unwrap();
@@ -302,6 +305,7 @@ impl<S: Iterator<Item=Span>> Parser<S> {
                 SizeHint::Long => dbuf.write_u24::<LittleEndian>(data as u32).unwrap(),
                 _ => unreachable!()
             }
+            if !has_comma { break; }
         }
         Ok(RawData {
             data: dbuf,
@@ -439,5 +443,35 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
             Ok(None) => None,
             Err(e) => Some(Statement::Error(e))
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lexer::Lexer;
+    #[test]
+    fn simple() {
+        let program = r"
+            define Thing 2 + 3
+            LDA $10 + $10
+            db $10, $20, $30
+        ";
+        let lexer = Lexer::new("<test>".to_string(), program.chars());
+        let parsed = Parser::new(lexer, Default::default()).collect::<Vec<_>>();
+        let (label, expr) = if let Statement::Define { ref label, ref expr } = parsed[0] { (label, expr) }
+            else { panic!("Wrong statement type {:?}", parsed[0]); };
+        assert_eq!(label.as_ident(), Some("Thing"));
+        assert_eq!(expr.root, ExprNode::Constant(5));
+
+        let (name, arg) = if let Statement::Instruction { ref name, ref arg, .. } = parsed[1] { (name, arg) }
+            else { panic!("Wrong statement type {:?}", parsed[1]); };
+        assert_eq!(name.as_ident(), Some("LDA"));
+        assert_eq!(arg.expr.root, ExprNode::Constant(32));
+
+        let data = if let Statement::RawData { ref data, .. } = parsed[2] { data }
+            else { panic!("Wrong statement type {:?}", parsed[2]); };
+        assert_eq!(data, &vec![16, 32, 48]);
     }
 }

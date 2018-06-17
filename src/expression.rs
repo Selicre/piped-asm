@@ -3,50 +3,9 @@
 use lexer::Span;
 use std::fmt;
 use instructions::SizeHint;
+pub use lls::LocalLabelState;
+use n_peek::{NPeekable,NPeekableHandle};
 
-#[derive(Debug,Default)]
-pub struct LocalLabelState {
-    pos_labels: Vec<usize>,
-    neg_labels: Vec<usize>,
-    local_labels: Vec<String>
-}
-
-impl LocalLabelState {
-    pub fn get_pos_id(&mut self, depth: usize) -> ExprNode {
-        if self.pos_labels.len() < depth+1 { self.pos_labels.resize(depth+1, 0); }
-        // always return the one in front, not behind
-        let id = self.pos_labels[depth] + 1;
-        ExprNode::PosLabel { depth, id }
-    }
-    pub fn incr_pos_id(&mut self, depth: usize) -> ExprNode {
-        if self.pos_labels.len() < depth+1 { self.pos_labels.resize(depth+1, 0); }
-        self.pos_labels[depth] += 1;
-        let id = self.pos_labels[depth];
-        ExprNode::PosLabel { depth, id }
-    }
-    pub fn get_neg_id(&mut self, depth: usize) -> ExprNode {
-        if self.neg_labels.len() < depth+1 { self.neg_labels.resize(depth+1, 0); }
-        let id = self.neg_labels[depth];
-        ExprNode::NegLabel { depth, id }
-    }
-    pub fn incr_neg_id(&mut self, depth: usize) -> ExprNode {
-        if self.neg_labels.len() < depth+1 { self.neg_labels.resize(depth+1, 0); }
-        self.neg_labels[depth] += 1;
-        let id = self.neg_labels[depth];
-        ExprNode::NegLabel { depth, id }
-    }
-    pub fn get_local(&self, depth: usize, new: String) -> ExprNode {
-        let mut stack = self.local_labels[..depth-1].to_vec();
-        stack.push(new);
-        ExprNode::LocalLabel { stack }
-    }
-    pub fn push_local(&mut self, depth: usize, s: String) -> ExprNode {
-        self.local_labels.resize(depth, "(anonymous)".to_string());
-        self.local_labels.push(s);
-        let stack = self.local_labels.to_vec();
-        ExprNode::LocalLabel { stack }
-    }
-}
 
 #[derive(Debug,Clone)]
 pub struct Expression {
@@ -150,32 +109,6 @@ impl BinOp {
             _ => return None
         })
     }
-    fn parse(list: &mut SpanList) -> Option<Self> {
-        use lexer::Span::*;
-        use self::BinOp::*;
-        Some(match list.next()? {
-            Symbol('&',_) => And,
-            Symbol('|',_) => Or,
-            Symbol('^',_) => Xor,
-            Symbol('<',_) => if list.peek(0).map(|c| c.is_symbol('<')).unwrap_or_default() {
-                list.next();
-                Asl
-            } else {
-                panic!("no less-than yet")
-            },
-            Symbol('>',_) => if list.peek(0).map(|c| c.is_symbol('>')).unwrap_or_default() {
-                list.next();
-                Lsr
-            } else {
-                panic!("no greater-than yet")
-            },
-            PosLabel(ref c) if c.data == 0 => Add,
-            NegLabel(ref c) if c.data == 0 => Sub,
-            Symbol('*',_) => Mul,
-            Symbol('/',_) => Div,
-            ref c => panic!("No such operand: {:?}", c) //return None
-        })
-    }
 }
 
 #[derive(Debug,Clone,Copy, PartialEq, Eq, Hash)]
@@ -186,15 +119,6 @@ pub enum UnOp {
 }
 
 impl UnOp {
-    fn parse(list: &mut SpanList) -> Option<Self> {
-        use lexer::Span::*;
-        use self::UnOp::*;
-        Some(match list.next()? {
-            Symbol('~',_) => Not,
-            NegLabel(ref c) if c.data == 0 => Unm,
-            _ => None?
-        })
-    }
     fn execute(&self, c: i32) -> i32 {
         use self::UnOp::*;
         match self {
@@ -215,7 +139,7 @@ struct ParserState<'a> {
     lls: &'a mut LocalLabelState
 }
 
-fn parse_unops(expr: &mut SpanList, state: &mut ParserState) -> Result<ExprNode,ExprError> {
+fn parse_unops<I: Iterator<Item=Span>>(expr: &mut SpanView<I>, state: &mut ParserState) -> Result<ExprNode,ExprError> {
     if let Some(op) = expr.peek_unop() {
         expr.next_unop();
         Ok(ExprNode::new_un_op(op, parse_unops(expr, state)?))
@@ -225,7 +149,7 @@ fn parse_unops(expr: &mut SpanList, state: &mut ParserState) -> Result<ExprNode,
     }
 }
 
-fn parse_expr(expr: &mut SpanList, prev: Option<ExprNode>, depth: usize, state: &mut ParserState) -> Result<ExprNode,ExprError> {
+fn parse_expr<I: Iterator<Item=Span>>(expr: &mut SpanView<I>, prev: Option<ExprNode>, depth: usize, state: &mut ParserState) -> Result<ExprNode,ExprError> {
     let term = match prev {
         Some(c) => c,
         None => parse_unops(expr, state)?
@@ -244,13 +168,15 @@ fn parse_expr(expr: &mut SpanList, prev: Option<ExprNode>, depth: usize, state: 
     }
 }
 
+
 impl Expression {
-    pub fn parse(expr: &[Span], lls: &mut LocalLabelState) -> Result<Self,ExprError> {
+    pub fn parse(expr: &mut NPeekable<impl Iterator<Item=Span>>, lls: &mut LocalLabelState) -> Result<Self,ExprError> {
         let mut state = ParserState {
             size_hint: SizeHint::default(),
             lls
         };
-        let (root, size) = ExprNode::parse(expr, &mut state)?;
+        let mut view = SpanView::new(expr);
+        let (root, size) = ExprNode::parse(&mut view, &mut state)?;
         Ok(Self { root, size })
     }
     pub fn with_size(&mut self, size: SizeHint) {
@@ -280,17 +206,8 @@ impl ExprNode {
     pub fn is_const(&self) -> Option<i32> {
         if let ExprNode::Constant(c) = self { Some(*c) } else { None }
     }
-    // todo: base this on a peekable iterator?
-    fn parse(expr: &[Span], state: &mut ParserState) -> Result<(Self, SizeHint),ExprError> {
-        if expr.len() == 1 {
-            match expr[0] {
-                Span::PosLabel(ref c) => return Ok((state.lls.get_pos_id(c.data), SizeHint::default())),
-                Span::NegLabel(ref c) => return Ok((state.lls.get_neg_id(c.data), SizeHint::default())),
-                _ => {}
-            }
-        }
-        let mut list = SpanList::new(expr);
-        let expr = parse_expr(&mut list, None, 0, state)?;
+    fn parse<I: Iterator<Item=Span>>(expr: &mut SpanView<I>, state: &mut ParserState) -> Result<(Self,SizeHint),ExprError> {
+        let expr = parse_expr(expr, None, 0, state)?;
         Ok((expr, state.size_hint))
     }
     pub fn reduce(&mut self) -> bool {
@@ -353,41 +270,6 @@ impl ExprNode {
             ExprNode::UnOp(op, Box::new(lhs))
         })
     }
-    fn from_span(c: &mut SpanList, state: &mut ParserState) -> Result<Self,ExprError> {
-        use self::Span::*;
-        let next = c.next()?;
-        Ok(match next {
-            Ident(c) => ExprNode::Label(c.data.clone()),
-            Number(d) | Byte(d) | Word(d) | Long(d) => {
-                state.size_hint = state.size_hint.max(next.size());
-                ExprNode::Constant(d.data)
-            },
-            String(c) => ExprNode::Str(c.data.clone()),
-            Symbol('(',_) => {
-                let prev = c.cur();
-                let mut depth = 1;
-                // todo: maybe this can be done in a more straightforward way
-                while depth > 0 {
-                    let ch = c.next()?;
-                    if ch.is_symbol('(') { depth += 1; }
-                    if ch.is_symbol(')') { depth -= 1; }
-                }
-                let (expr, _size) = Self::parse(&c[prev..c.cur()-1], state)?;
-                expr
-            },
-            Symbol('.',_) => {
-                let mut depth = 1;
-                while c.peek(0)?.is_symbol('.') { depth += 1; c.next(); }
-                match c.next()? {
-                    PosLabel(d) => state.lls.get_pos_id(d.data),
-                    NegLabel(d) => state.lls.get_neg_id(d.data),
-                    Ident(d) => state.lls.get_local(depth, d.data.clone()),
-                    c => Err(ExprError::InvalidAfterDot(c.clone()))?
-                }
-            },
-            c => Err(ExprError::InvalidOperand(c.clone()))?
-        })
-    }
 }
 
 #[derive(Debug)]
@@ -405,65 +287,140 @@ impl From<NoneError> for ExprError {
     }
 }
 
-
-struct SpanList<'a> {
-    cur: usize,
-    src: &'a [Span]
+fn erase_type(i: impl Iterator) -> impl Iterator {
+    i
 }
-impl<'a> SpanList<'a> {
-    fn new(src: &'a [Span]) -> Self {
-        Self { src, cur: 0 }
-    }
-    fn cur(&self) -> usize {
-        self.cur
-    }
-    fn set_pos(&mut self, pos: usize) {
-        self.cur = pos
-    }
-    fn peek(&mut self, index: isize) -> Option<&'a Span> {
-        self.src.get((self.cur as isize + index) as usize)
-    }
-    fn next(&mut self) -> Option<&'a Span> {
-        self.src.get(self.cur).map(|c| {
-            self.cur += 1;
-            c
-        })
+
+// Helper wrapper struct.
+struct SpanView<'a, I: Iterator + 'a> {
+    iter: &'a mut NPeekable<I>
+}
+impl<'a, I: Iterator<Item=Span> + 'a> SpanView<'a, I> {
+    fn new(iter: &'a mut NPeekable<I>) -> Self {
+        Self { iter }
     }
     fn next_node(&mut self, state: &mut ParserState) -> Result<ExprNode,ExprError> {
-        while self.peek(0).map(|c| c.is_whitespace()).unwrap_or_default() { self.next(); }
-        ExprNode::from_span(self, state)
+        use self::Span::*;
+        let c = &mut self.iter;
+        let next = c.next()?;
+        let size = next.size();
+        Ok(match next {
+            Ident(c) => ExprNode::Label(c.data.clone()),
+            Number(d) | Byte(d) | Word(d) | Long(d) => {
+                state.size_hint = state.size_hint.max(size);
+                ExprNode::Constant(d.data)
+            },
+            String(c) => ExprNode::Str(c.data.clone()),
+            Symbol('(',_) => {
+                // TODO: make this mess a bit better
+                let iter = Box::new(self.by_ref().take_while(|c| !c.is_symbol(')'))) as Box<Iterator<Item=_>>;
+                let iter = &mut NPeekable::new(iter);
+                let mut view = SpanView::new(iter);
+                let (expr, _size) = ExprNode::parse(&mut view, state)?;
+                expr
+            },
+            Symbol('.',_) => {
+                let mut depth = 1;
+                while c.peek(0)?.is_symbol('.') { depth += 1; c.next(); }
+                match c.next()? {
+                    PosLabel(d) => state.lls.get_pos_id(d.data),
+                    NegLabel(d) => state.lls.get_neg_id(d.data),
+                    Ident(d) => state.lls.get_local(depth, d.data.clone()),
+                    c => Err(ExprError::InvalidAfterDot(c.clone()))?
+                }
+            },
+            c => Err(ExprError::InvalidOperand(c.clone()))?
+        })
     }
     fn next_op(&mut self) -> Option<BinOp> {
-        while self.peek(0).map(|c| c.is_whitespace()).unwrap_or_default() { self.next(); }
-        BinOp::parse(self)
+        let mut h = self.handle();
+        let op = Self::peek_op_inner(&mut h);
+        h.buffer();
+        op
     }
     fn peek_op(&mut self) -> Option<BinOp> {
-        let cur = self.cur;
-        let c = self.next_op();
-        self.cur = cur;
-        c
+        Self::peek_op_inner(&mut self.handle())
+    }
+    fn peek_op_inner(handle: &mut NPeekableHandle<I>) -> Option<BinOp> {
+        use lexer::Span::*;
+        use self::BinOp::*;
+        Some(match handle.next()? {
+            Symbol('&',_) => And,
+            Symbol('|',_) => Or,
+            Symbol('^',_) => Xor,
+            Symbol('<',_) => if handle.peek(0).map(|c| c.is_symbol('<')).unwrap_or_default() {
+                handle.next();
+                Asl
+            } else {
+                panic!("no less-than yet")
+            },
+            Symbol('>',_) => if handle.peek(0).map(|c| c.is_symbol('>')).unwrap_or_default() {
+                handle.next();
+                Lsr
+            } else {
+                panic!("no greater-than yet")
+            },
+            PosLabel(ref c) if c.data == 0 => Add,
+            NegLabel(ref c) if c.data == 0 => Sub,
+            Symbol('*',_) => Mul,
+            Symbol('/',_) => Div,
+            ref c => panic!("No such operand: {:?}", c) //return None
+        })
     }
     fn next_unop(&mut self) -> Option<UnOp> {
-        while self.peek(0).map(|c| c.is_whitespace()).unwrap_or_default() { self.next(); }
-        UnOp::parse(self)
+        let op = self.peek_unop();
+        self.iter.next();
+        op
     }
     fn peek_unop(&mut self) -> Option<UnOp> {
-        let cur = self.cur;
-        let c = self.next_unop();
-        self.cur = cur;
-        c
-    }
-    fn rest(&self) -> Self {
-        Self::new(&self.src[self.cur..])
-    }
-}
-impl<'a> ::std::ops::Deref for SpanList<'a> {
-    type Target = [Span];
-    fn deref(&self) -> &[Span] {
-        &self.src
+        use lexer::Span::*;
+        use self::UnOp::*;
+        Some(match self.iter.peek(0)? {
+            Symbol('~',_) => Not,
+            NegLabel(ref c) if c.data == 0 => Unm,
+            _ => None?
+        })
     }
 }
 
+impl<'a, I: Iterator + 'a> ::std::ops::Deref for SpanView<'a,I> {
+    type Target = NPeekable<I>;
+    fn deref(&self) -> &Self::Target {
+        self.iter
+    }
+}
+impl<'a, I: Iterator + 'a> ::std::ops::DerefMut for SpanView<'a,I> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.iter
+    }
+}
 
-
-
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lexer::Lexer;
+    fn proc(c: &str, res: &ExprNode) {
+        let lexed = Lexer::new("<test>".to_string(), c.chars())
+            .filter(|c| !c.is_whitespace());
+        let mut iter = NPeekable::new(lexed);
+        let expr = Expression::parse(&mut iter, &mut Default::default()).unwrap();
+        assert_eq!(&expr.root, res);
+    }
+    #[test]
+    fn basic() {
+        use self::ExprNode::*;
+        let cases = [
+            ("2 + 4",       Constant(6)),
+            ("-2 + 4",      Constant(2)),
+            ("2 + -4",      Constant(-2)),
+            ("-2 + -4",     Constant(-6)),
+            ("2 << 2",      Constant(8)),
+            ("2 * (2 + 2)", Constant(8)),
+            ("(3 + 2) * 2", Constant(10)),
+            ("(3+2*3)*2",   Constant(18)),
+        ];
+        for (inp, out) in cases.into_iter() {
+            proc(inp, out);
+        }
+    }
+}
