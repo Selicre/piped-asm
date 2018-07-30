@@ -175,6 +175,8 @@ impl Banks {
                 if b != 0 { Err("bank for VBlank not 0")?; }
                 let (b, irq) = self.refs.get("IRQ").unwrap_or(&(0, 0x7FFF)).clone();
                 if b != 0 { Err("bank for IRQ not 0")?; }
+                let (b, brk) = self.refs.get("BRK").unwrap_or(&(0, 0x7FFF)).clone();
+                if b != 0 { Err("bank for BRK not 0")?; }
                 let h = header(start as u16, nmi as u16, irq as u16);
                 bank_contents.resize(0x7FC0, 0x00);
                 bank_contents.extend_from_slice(&h.data);
