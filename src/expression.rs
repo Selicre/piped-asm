@@ -10,7 +10,7 @@ use n_peek::{NPeekable,NPeekableHandle};
 #[derive(Debug,Clone)]
 pub struct Expression {
     pub root: ExprNode,
-    pub size: SizeHint
+    pub size: SizeHint,
 }
 
 // TODO: use SpanData?
@@ -175,6 +175,13 @@ impl Expression {
             size_hint: SizeHint::default(),
             lls
         };
+        if expr.peek(1).is_none() {
+            match expr.peek(0)? {
+                Span::PosLabel(ref c) => return Ok(Self { root: state.lls.get_pos_id(c.data), size: SizeHint::default() }),
+                Span::NegLabel(ref c) => return Ok(Self { root: state.lls.get_neg_id(c.data), size: SizeHint::default() }),
+                _ => {}
+            }
+        }
         let mut view = SpanView::new(expr);
         let (root, size) = ExprNode::parse(&mut view, &mut state)?;
         Ok(Self { root, size })
@@ -277,13 +284,13 @@ pub enum ExprError {
     InvalidOperand(Span),
     InvalidAfterDot(Span),
     Other,
-    EOF
+    EOF(Span)
 }
 
 use std::option::NoneError;
 impl From<NoneError> for ExprError {
     fn from(_: NoneError) -> Self {
-        ExprError::EOF
+        ExprError::EOF(Span::Empty)
     }
 }
 
@@ -399,7 +406,7 @@ impl<'a, I: Iterator + 'a> ::std::ops::DerefMut for SpanView<'a,I> {
 mod tests {
     use super::*;
     use lexer::Lexer;
-    fn proc(c: &str, res: &ExprNode) {
+    fn process(c: &str, res: &ExprNode) {
         let lexed = Lexer::new("<test>".to_string(), c.chars())
             .filter(|c| !c.is_whitespace());
         let mut iter = NPeekable::new(lexed);
@@ -418,9 +425,10 @@ mod tests {
             ("2 * (2 + 2)", Constant(8)),
             ("(3 + 2) * 2", Constant(10)),
             ("(3+2*3)*2",   Constant(18)),
+            //("-",            NegLabel { depth: 0, id: 0 }),
         ];
         for (inp, out) in cases.into_iter() {
-            proc(inp, out);
+            process(inp, out);
         }
     }
 }

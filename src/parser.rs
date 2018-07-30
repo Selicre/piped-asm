@@ -273,6 +273,22 @@ impl<S: Iterator<Item=Span>> Parser<S> {
             pending_exprs: vec![]
         })
     }
+    fn lua(&mut self) -> Result<Option<Statement>,ParseError> {
+        use lexer::Lexer;
+        use std::process::Command;
+        let script = self.skip_wsp()?.as_string().ok_or(ParseError::GenericSyntaxError)?;
+        let child = Command::new("lua")
+            .arg(&script)
+            .spawn().map_err(ParseError::IO)?;
+        let state = self.state.clone();
+        // oh god
+        let chars = child.stdout.unwrap().chars().map(Result::unwrap);
+        let lexed = Lexer::new(script.to_string(), chars);
+        let mut parsed = Box::new(Parser::new(lexed, state));
+        let first_stmt = parsed.next();
+        self.incsrc = Some(parsed);
+        Ok(first_stmt)
+    }
     fn inline_data(&mut self, attrs: Vec<Attribute>, size: SizeHint) -> Result<Statement,ParseError> {
         use self::Span::*;
         use self::Statement::*;
@@ -394,6 +410,10 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                     _ => match &*id1.data {
                         "define" => self.define()?,
                         "incsrc" => match self.incsrc(&attrs)? {
+                            Some(c) => c,
+                            None => continue
+                        },
+                        "lua" => match self.lua()? {
                             Some(c) => c,
                             None => continue
                         },

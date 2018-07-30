@@ -147,7 +147,7 @@ impl Banks {
                         }
                     });
                     expr.reduce();
-                    let mut val = if let ExprNode::Constant(c) = expr.root { c } else { panic!("Can't collapse expression {}", expr.root) };
+                    let mut val = if let ExprNode::Constant(c) = expr.root { c } else { panic!("Can't collapse expression {} in {}", expr.root, label) };
                     c.seek(SeekFrom::Start(expr_offset as u64)).unwrap();
                     match size {
                         SizeHint::Byte => {

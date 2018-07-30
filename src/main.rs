@@ -20,7 +20,6 @@ mod instructions;
 mod compiler;
 mod linker;
 mod expression;
-//mod expression_iter;
 mod attributes;
 mod colors;
 mod n_peek;

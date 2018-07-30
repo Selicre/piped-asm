@@ -239,7 +239,7 @@ impl Compiler {
                     let s = instructions::size_hint(&name.as_ident().unwrap().to_uppercase());
                     // if implicit size (INC/DEC), then don't add it
                     // TODO: fix inconsistency?
-                    const_only |= s == SizeHint::Implicit;
+                    const_only |= (s == SizeHint::Implicit && arg.expr.root == ExprNode::Label("A".to_string()));
                     let s = s.and_then(arg.expr.size)
                         .and_then(size.0);
                     if !const_only {
