@@ -7,7 +7,7 @@ use std::io;
 use instructions::SizeHint;
 use expression::ExprNode;
 
-#[derive(Debug)]
+#[derive(Debug,Copy,Clone)]
 pub enum AddressingMode {
     Implied,
     Immediate(u8),      // #$A0

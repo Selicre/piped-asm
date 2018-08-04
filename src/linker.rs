@@ -142,7 +142,9 @@ impl Banks {
                                     (*b as i32)*0x10000 + *c as i32
                                 })
                             },
-                            LabelOffset(d) => *c = ExprNode::Constant(0x8000 + (*offset as i32)+(*d as i32)),
+                            LabelOffset(d) => {
+                                *c = ExprNode::Constant(0x8000 + (*offset as i32)+(*d as i32))
+                            },
                             _ => {}
                         }
                     });
@@ -177,7 +179,7 @@ impl Banks {
                 if b != 0 { Err("bank for IRQ not 0")?; }
                 let (b, brk) = self.refs.get("BRK").unwrap_or(&(0, 0x7FFF)).clone();
                 if b != 0 { Err("bank for BRK not 0")?; }
-                let h = header(start as u16, nmi as u16, irq as u16);
+                let h = header(start as u16, nmi as u16, irq as u16, brk as u16);
                 bank_contents.resize(0x7FC0, 0x00);
                 bank_contents.extend_from_slice(&h.data);
             } else {
@@ -191,7 +193,7 @@ impl Banks {
     }
 }
 
-fn header(entry: u16, nmi: u16, irq: u16) -> LabeledChunk {
+fn header(entry: u16, nmi: u16, irq: u16, brk: u16) -> LabeledChunk {
     ((|| {
     let mut chunk = LabeledChunk::default();
     // LOROM only, for now
@@ -209,7 +211,7 @@ fn header(entry: u16, nmi: u16, irq: u16) -> LabeledChunk {
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // COP enable
-    chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // BRK
+    chunk.data.write_u16::<LittleEndian>(brk)?;   // BRK
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // ABORT
     chunk.data.write_u16::<LittleEndian>(nmi)?;      // NMI
     chunk.data.write_u16::<LittleEndian>(0xFFFF)?;   // RESET (unused)

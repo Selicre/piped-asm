@@ -38,8 +38,9 @@ impl fmt::Display for ExprNode {
         use self::ExprNode::*;
         match self {
             Empty => write!(f, "empty"),
-            Constant(c) => write!(f, "{}", c),
+            Constant(c) => write!(f, "${:04X} ({})", c, c),
             LabelOffset(c) => write!(f, "Label offset {}", c),
+            LocalLabel { stack } => { for i in stack.iter() { write!(f, ".{}", i)? } Ok(()) },
             Label(ref s) => write!(f, "{}", s),
             PosLabel { depth, .. } => write!(f, "+({})", depth),
             NegLabel { depth, .. } => write!(f, "-({})", depth),

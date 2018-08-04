@@ -8,7 +8,7 @@ use std::io::{self, Write};
 #[derive(Debug)]
 pub enum CompileError {
     Instruction,
-    AddressMode,
+    AddressMode(AddressingMode),
     WriteError(io::Error)
 }
 
@@ -129,7 +129,7 @@ impl Instruction {
         }
     }
     pub fn write_to<W: Write>(&self, mut w: W) -> Result<(), CompileError> {
-        let arg = &self.arg;
+        let arg = self.arg;
         use self::AddressingMode::*;
         macro_rules! write {
             ($opcode:expr) => {{
@@ -148,16 +148,16 @@ impl Instruction {
             }}
         }
         macro_rules! kinds {
-            (Implied => $im:expr) => { match arg { Implied => write!($im), _ => return Err(CompileError::AddressMode) } };
+            (Implied => $im:expr) => { match arg { Implied => write!($im), _ => return Err(CompileError::AddressMode(arg)) } };
 
-            (Implied => $im:expr, $($p:ident => $e:expr),*) => { match arg { Implied => write!($im), $($p(_) => write!($e)),*, _ => return Err(CompileError::AddressMode) } };
-            ($($p:ident => $e:expr),*) => { match arg { $($p(_) => write!($e)),*, _ => return Err(CompileError::AddressMode) } };
+            (Implied => $im:expr, $($p:ident => $e:expr),*) => { match arg { Implied => write!($im), $($p(_) => write!($e)),*, _ => return Err(CompileError::AddressMode(arg)) } };
+            ($($p:ident => $e:expr),*) => { match arg { $($p(_) => write!($e)),*, _ => return Err(CompileError::AddressMode(arg)) } };
         }
         macro_rules! move_mem {
             ($e:expr) => {
                 match arg {
                     ImmediateWord(arg) => write!($e),
-                    BlockMove(b1,b2) => write_block_move!($e, *b1, *b2), _ => return Err(CompileError::AddressMode)
+                    BlockMove(b1,b2) => write_block_move!($e, b1, b2), _ => return Err(CompileError::AddressMode(arg))
                 }
             }
         }
@@ -165,8 +165,8 @@ impl Instruction {
             ($e:expr) => {
                 match arg {
                     Implied => write!($e),
-                    Immediate(c) => write!(@rep *c, $e),
-                    _ => return Err(CompileError::AddressMode)
+                    Immediate(c) => write!(@rep c, $e),
+                    _ => return Err(CompileError::AddressMode(arg))
                 }
             }
         }
@@ -271,17 +271,17 @@ impl Instruction {
             // JUMPS
             "JMP" => kinds! {
                 Absolute =>     0x4C,
-                AbsLong =>         0x5C,
+                AbsLong =>      0x5C,
                 AbsInd =>       0x6C,
                 AbsIndX =>      0x7C,
                 AbsIndLong =>   0xDC
             },
             "JML" => kinds! {
-                AbsLong =>         0x5C,
+                AbsLong =>      0x5C,
                 AbsIndLong =>   0xDC
             },
             "JSL" => kinds! {
-                AbsLong =>         0x22
+                AbsLong =>      0x22
             },
             "JSR" => kinds! {
                 Absolute =>     0x20,
@@ -328,7 +328,7 @@ impl Instruction {
                 DirectPage =>   0x85,
                 DPIndLong =>    0x87,
                 Absolute =>     0x8D,
-                AbsLong =>         0x8F,
+                AbsLong =>      0x8F,
                 DPIndY =>       0x91,
                 DPInd =>        0x92,
                 StackY =>       0x93,
@@ -336,7 +336,7 @@ impl Instruction {
                 DPIndLongY =>   0x97,
                 AbsoluteY =>    0x99,
                 AbsoluteX =>    0x9D,
-                AbsLongX =>        0x9F
+                AbsLongX =>     0x9F
             },
             "STX" => kinds! {
                 DirectPage =>   0x86,
@@ -356,7 +356,7 @@ impl Instruction {
                 Immediate =>    0xA9,
                 ImmediateWord =>0xA9,
                 Absolute =>     0xAD,
-                AbsLong =>         0xAF,
+                AbsLong =>      0xAF,
                 DPIndY =>       0xB1,
                 DPInd =>        0xB2,
                 StackY =>       0xB3,
@@ -364,7 +364,7 @@ impl Instruction {
                 DPIndLongY =>   0xB7,
                 AbsoluteY =>    0xB9,
                 AbsoluteX =>    0xBD,
-                AbsLongX =>        0xBF
+                AbsLongX =>     0xBF
             },
             "LDX" => kinds! {
                 Immediate =>    0xA2,
@@ -394,15 +394,16 @@ impl Instruction {
             // STACK STUFF
             "PEA" => kinds! {
                 ImmediateWord =>0xF4,
-                Absolute => 0xF4
+                Absolute =>     0xF4
             },
             "PEI" => kinds! {
-                DPInd =>        0xD4
+                DirectPage =>   0xD4,
+                Immediate =>    0xD4
             },
             "PER" => kinds! {       // TODO: fix
-                Relative => 0x62,
+                Relative =>     0x62,
                 RelativeWord => 0x62,
-                Absolute => 0x62
+                Absolute =>     0x62
             },
             "PHA" => implied!(0x48),
             "PHX" => implied!(0xDA),
