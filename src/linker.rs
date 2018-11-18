@@ -52,6 +52,15 @@ impl Bank {
                                    // Make space for the header
         self.size + chunk.size() <= if bank == 0 { 0x7FC0 } else { 0x8000 }
     }
+    fn is_clear(&self) -> bool {
+        self.size == 0
+    }
+    // In the future, it will be possible to pin chunks to addresses after $00, and data from
+    // this bank may be adjusted to fit automatically.
+    // For now, it's literally just whether the bank is clean
+    fn fits_head(&self, chunk: &LabeledChunk) -> bool {
+        self.size == 0
+    }
 }
 
 struct Banks {
@@ -75,6 +84,17 @@ impl Banks {
     fn add_define(&mut self, label: String, expr: Expression) {
         self.defines.insert(label, expr);
     }
+    fn append_spanning_chunk(&mut self, label: String, chunk: LabeledChunk) -> Option<usize> {
+        // LOROM only
+        let req_empty_banks = chunk.size()/0x8000;  // How many full banks does this data take?
+        if req_empty_banks > 0 {
+            panic!("I don't support chunks larger than 32k yet");
+            //self.content.windows(req_empty_banks)
+            // ...
+        }
+        panic!();
+
+    }
     fn append_chunk(&mut self, label: String, chunk: LabeledChunk) -> Option<usize> {
         let (bank_id, bank) = match chunk.bank_hint {
             Some(c) => {
@@ -89,7 +109,18 @@ impl Banks {
         };
 
         self.last_bank = bank_id as u8;
-        self.refs.insert(label.clone(), (bank_id as u8, bank.size + 0x8000));
+        let addr = (bank_id as u8, bank.size + 0x8000);
+        for i in chunk.attrs.iter() {
+            use attributes::Attribute::*;
+            match i {
+                Start => { self.refs.insert("*Start".to_string(), addr); },
+                NMI =>   { self.refs.insert("*NMI".to_string(), addr); },
+                IRQ =>   { self.refs.insert("*IRQ".to_string(), addr); },
+                BRK =>   { self.refs.insert("*BRK".to_string(), addr); },
+                _ => {}
+            };
+        }
+        self.refs.insert(label.clone(), addr);
         let addr = bank_id * 0x10000 + bank.size + 0x8000;
         bank.append(label, chunk);
         Some(addr)
@@ -139,7 +170,7 @@ impl Banks {
                                         word_refs.push(d.to_string());
                                     }
                                     let (b,c) = refs.get(d).unwrap_or_else(|| panic!("not found label: {}", d));
-                                    (*b as i32)*0x10000 + *c as i32
+                                    (*b as i32)*0x10000 + *c as i32 + 0x800000
                                 })
                             },
                             LabelOffset(d) => {
@@ -171,13 +202,13 @@ impl Banks {
             }
 
             if *bank_id == 0 {
-                let (b, start) = self.refs["Start"];
+                let (b, start) = self.refs["*Start"];
                 if b != 0 { Err("bank for Start not 0")?; }
-                let (b, nmi) = self.refs["VBlank"];
+                let (b, nmi) = self.refs["*NMI"];
                 if b != 0 { Err("bank for VBlank not 0")?; }
-                let (b, irq) = self.refs.get("IRQ").unwrap_or(&(0, 0x7FFF)).clone();
+                let (b, irq) = self.refs.get("*IRQ").unwrap_or(&(0, 0x7FFF)).clone();
                 if b != 0 { Err("bank for IRQ not 0")?; }
-                let (b, brk) = self.refs.get("BRK").unwrap_or(&(0, 0x7FFF)).clone();
+                let (b, brk) = self.refs.get("*BRK").unwrap_or(&(0, 0x7FFF)).clone();
                 if b != 0 { Err("bank for BRK not 0")?; }
                 let h = header(start as u16, nmi as u16, irq as u16, brk as u16);
                 bank_contents.resize(0x7FC0, 0x00);
@@ -198,8 +229,9 @@ fn header(entry: u16, nmi: u16, irq: u16, brk: u16) -> LabeledChunk {
     let mut chunk = LabeledChunk::default();
     // LOROM only, for now
     chunk.pin(0x7FC0);
-    // 21 bytes:       ---------------------
-    chunk.data.write_all(b"SUPER MARIOWORLD     ")?;
+    let mut title = "SUPER MARIOWORLD     ".as_bytes().to_vec();
+    title.resize(21, b' ');
+    chunk.data.write_all(&title)?;
     chunk.data.write_all(&[
     // ROM makeup, type, size (TODO!), SRAM size, destination code
         0x20, 0x02, 0x10, 0x01, 0x01, 0x01 ])?;

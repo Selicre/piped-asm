@@ -224,11 +224,12 @@ impl From<NoneError> for ParseError {
 pub struct Parser<S: Iterator> {
     iter: NPeekable<S>,
     incsrc: Option<Box<Iterator<Item=Statement>>>,
+    global_attrs: Vec<Attribute>,
     state: CompilerState,
 }
 impl<S: Iterator<Item=Span>> Parser<S> {
-    pub fn new(iter: S, state: CompilerState) -> Self {
-        Self { iter: NPeekable::new(iter), state, incsrc: None }
+    pub fn new(iter: S, state: CompilerState, attrs: Vec<Attribute>) -> Self {
+        Self { iter: NPeekable::new(iter), state, global_attrs: attrs, incsrc: None }
     }
     // .next() but skip whitespace
     fn skip_wsp(&mut self) -> Option<Span> {
@@ -250,14 +251,14 @@ impl<S: Iterator<Item=Span>> Parser<S> {
         use self::Span::*;
         use self::Statement::*;
         use std::fs::File;
-        use lexer::Lexer;
+        use lexer;
         let state = self.state.clone();
         let filename = self.skip_wsp()?.as_string().ok_or(ParseError::GenericSyntaxError)?;
-        let file = File::open(&filename).map_err(ParseError::IO)?;
+        /*let file = File::open(&filename).map_err(ParseError::IO)?;
         let file = BufReader::new(file);
-        let chars = file.chars().map(Result::unwrap);
-        let lexed = Lexer::new(filename.to_string(), chars);
-        let mut parsed = Box::new(Parser::new(lexed, state));
+        let chars = file.chars().map(Result::unwrap);*/
+        let lexed = lexer::from_filename(filename.to_string()).unwrap();
+        let mut parsed = Box::new(Parser::new(lexed, state, self.global_attrs.clone()));
         let first_stmt = parsed.next();
         self.incsrc = Some(parsed);
         Ok(first_stmt)
@@ -279,12 +280,14 @@ impl<S: Iterator<Item=Span>> Parser<S> {
         let script = self.skip_wsp()?.as_string().ok_or(ParseError::GenericSyntaxError)?;
         let child = Command::new("lua")
             .arg(&script)
-            .spawn().map_err(ParseError::IO)?;
+            .output().unwrap();//.map_err(ParseError::IO)?;
         let state = self.state.clone();
-        // oh god
-        let chars = child.stdout.unwrap().chars().map(Result::unwrap);
-        let lexed = Lexer::new(script.to_string(), chars);
-        let mut parsed = Box::new(Parser::new(lexed, state));
+        // TODO: make this mess more bearable
+        //let mut out = String::new();
+        //child.stdout.unwrap().read_to_string(&mut out).unwrap();
+        let mut out = String::from_utf8(child.stdout).unwrap();
+        let lexed = Lexer::new(script.to_string(), out.chars().collect::<Vec<_>>().into_iter());
+        let mut parsed = Box::new(Parser::new(lexed, state, self.global_attrs.clone()));
         let first_stmt = parsed.next();
         self.incsrc = Some(parsed);
         Ok(first_stmt)
@@ -306,6 +309,7 @@ impl<S: Iterator<Item=Span>> Parser<S> {
             // db "thing"
             if let ExprNode::Str(s) = expr.root {
                 dbuf.write(s.as_bytes()).unwrap();
+                if !has_comma { break; }
                 continue
             }
             let data = if let Some(c) = expr.is_const() {
@@ -391,7 +395,7 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
         }
         use self::Span::*;
         use self::Statement::*;
-        let mut attrs = Vec::new();
+        let mut attrs = self.global_attrs.clone();
         let res = (|| {
             // loop allows the use of "continue"
             loop {
@@ -442,19 +446,36 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                         attrs, name
                     }
                 },
-                Symbol('#',_) => {
-                    let iter = &mut self.iter;
-                    if !iter.next()?.is_symbol('[') { println!("["); return Err(ParseError::GenericSyntaxError) }
-                    let buf = iter.by_ref()
-                        .take_while(|c| !c.is_symbol(']'))
-                        .collect::<Vec<_>>();
-                    let c = buf.split(|c| c.is_symbol(','))
-                        .map(Attribute::from_span)
-                        .collect::<Result<Vec<_>,_>>()
-                        .map_err(ParseError::AttributeError)?;
-                    attrs.extend(c);
-                    continue;
-                },
+                Symbol('#',_) => match self.iter.next()? {
+                    // TODO: deduplicate?
+                    Symbol('!',_) => {
+                        let iter = &mut self.iter;
+                        if !iter.next()?.is_symbol('[') { return Err(ParseError::GenericSyntaxError) }
+                        let buf = iter.by_ref()
+                            .take_while(|c| !c.is_symbol(']'))
+                            .collect::<Vec<_>>();
+                        let c = buf.split(|c| c.is_symbol(','))
+                            .map(Attribute::from_span)
+                            .collect::<Result<Vec<_>,_>>()
+                            .map_err(ParseError::AttributeError)?;
+                        self.global_attrs.extend(c.iter().cloned());
+                        attrs.extend(c);
+                        continue;
+                    },
+                    Symbol('[',_) => {
+                        let iter = &mut self.iter;
+                        let buf = iter.by_ref()
+                            .take_while(|c| !c.is_symbol(']'))
+                            .collect::<Vec<_>>();
+                        let c = buf.split(|c| c.is_symbol(','))
+                            .map(Attribute::from_span)
+                            .collect::<Result<Vec<_>,_>>()
+                            .map_err(ParseError::AttributeError)?;
+                        attrs.extend(c);
+                        continue;
+                    },
+                    _ => { return Err(ParseError::GenericSyntaxError) },
+                }
                 c => { println!("c: {:?}", c); Nothing }
             })) }
         })();

@@ -1,6 +1,7 @@
 use std::mem;
 use std::rc::Rc;
 use std::fmt::{self, Display};
+use std::io;
 
 use instructions::SizeHint;
 
@@ -69,6 +70,14 @@ impl<R: Iterator<Item=char>> Lexer<R> {
             finished: false
         }
     }
+}
+
+pub fn from_filename(filename: String) -> Result<Lexer<impl Iterator<Item=char>>, io::Error> {
+    use std::fs::File;
+    use std::io::Read;
+    let mut buf = String::new();
+    File::open(filename.clone())?.read_to_string(&mut buf)?;
+    Ok(Lexer::new(filename, buf.chars().collect::<Vec<_>>().into_iter()))
 }
 
 impl<R: Iterator<Item=char>> Iterator for Lexer<R> {

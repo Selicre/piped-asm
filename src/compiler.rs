@@ -118,18 +118,23 @@ struct LocalState {
 }
 
 impl Compiler {
+    pub fn from_iter(inner: impl Iterator<Item=Statement> + 'static, state: CompilerState) -> Self {
+        Self { inner: Box::new(inner) as Box<Iterator<Item=_>>, state, extra: Vec::new(), next_attrs: Vec::new(), next_label: Some(SpanData::create("*root".to_string())) }
+    }
     pub fn new(filename: &str) -> Result<Self,Box<Error>> {
         use std::io::{self,prelude::*,BufReader};
         use std::fs::File;
+        use lexer;
         let state = CompilerState::default();
         let file = match filename {
             "-" => Box::new(io::stdin()) as Box<Read>,
             c => Box::new(File::open(c)?)
         };
         let file = BufReader::new(file);
-        let lexed = Lexer::new(filename.to_string(), file.chars().map(|c| c.unwrap()));
-        let inner = Box::new(Parser::new(lexed, state.clone()));
-        Ok(Self { inner, state, extra: Vec::new(), next_attrs: Vec::new(), next_label: Some(SpanData::create("*root".to_string())) })
+        let lexed = lexer::from_filename(filename.to_string()).unwrap();
+        let inner = Parser::new(lexed, state.clone(), Vec::new());
+        Ok(Self::from_iter(inner, state))
+        //Ok(Self { inner, state, extra: Vec::new(), next_attrs: Vec::new(), next_label: Some(SpanData::create("*root".to_string())) })
     }
     // This function calculates all expressions that can be reduced (usually ones with local
     // labels), and if it ends up being a constant, it replaces the part in the chunk with that
@@ -263,7 +268,7 @@ impl Compiler {
                     let s = instructions::size_hint(&name.as_ident().unwrap().to_uppercase());
                     // if implicit size (INC/DEC), then don't add it
                     // TODO: fix inconsistency?
-                    const_only |= (s == SizeHint::Implicit && arg.expr.root == ExprNode::Label("A".to_string()));
+                    const_only |= s == SizeHint::Implicit && arg.expr.root == ExprNode::Label("A".to_string());
                     let s = s.and_then(arg.expr.size)
                         .and_then(size.0);
                     if !const_only {
