@@ -24,6 +24,8 @@ use instructions::SizeHint;
 
 use expression::{Expression,ExprNode};
 
+use attributes::Attribute;
+
 // Anything that isn't directly bank data (lorom mode, etc.), also TODO
 struct BankContext {
     
@@ -81,7 +83,22 @@ impl Banks {
             refs: Default::default()
         }
     }
-    fn add_define(&mut self, label: String, expr: Expression) {
+    fn add_define(&mut self, label: String, attrs: Vec<Attribute>, expr: Expression) {
+        use attributes::Attribute::*;
+        {
+            let addr = || (0, if let ExprNode::Constant(c) = expr.root { c } else {
+                panic!("Linker attributes for expressions are not supported (yet!)");
+            } as usize);
+            for i in attrs {
+                match i {
+                    Start => { self.refs.insert("*Start".to_string(), addr()); },
+                    NMI =>   { self.refs.insert("*NMI".to_string(), addr()); },
+                    IRQ =>   { self.refs.insert("*IRQ".to_string(), addr()); },
+                    BRK =>   { self.refs.insert("*BRK".to_string(), addr()); },
+                    _ => {}
+                }
+            }
+        }
         self.defines.insert(label, expr);
     }
     fn append_spanning_chunk(&mut self, label: String, chunk: LabeledChunk) -> Option<usize> {
@@ -282,8 +299,8 @@ pub fn link<W: Write, I: Iterator<Item=CompileData>>(writer: W, iter: I) {
                 }
                 now = Instant::now();
             },
-            CompileData::Define { label, expr } => {
-                banks.add_define(label, expr);
+            CompileData::Define { label, attrs, expr } => {
+                banks.add_define(label, attrs, expr);
             },
             c => panic!("{:?}",c) // todo: handle
         }

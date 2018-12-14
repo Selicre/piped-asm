@@ -160,7 +160,8 @@ pub enum Statement {
     },
     Define {
         label: Span,
-        expr: Expression
+        expr: Expression,
+        attrs: Vec<Attribute>
     },
     Nothing,
     Error(ParseError)
@@ -235,7 +236,7 @@ impl<S: Iterator<Item=Span>> Parser<S> {
     fn skip_wsp(&mut self) -> Option<Span> {
         self.iter.by_ref().filter(|c| !c.is_whitespace()).next()
     }
-    fn define(&mut self) -> Result<Statement, ParseError> {
+    fn define(&mut self, attrs: Vec<Attribute>) -> Result<Statement, ParseError> {
         use self::Span::*;
         let label = self.skip_wsp()?;
         if !label.as_ident().is_some() { return Err(ParseError::Unexpected(label, "ident")) }
@@ -244,6 +245,7 @@ impl<S: Iterator<Item=Span>> Parser<S> {
             .filter(|c| c != &Whitespace);
         Ok(Statement::Define {
             label,
+            attrs,
             expr: Expression::parse(&mut NPeekable::new(iter), &mut self.state.borrow_mut().lls).map_err(ParseError::ExprError)?
         })
     }
@@ -412,7 +414,7 @@ impl<S: Iterator<Item=Span>> Iterator for Parser<S> {
                         }
                     },
                     _ => match &*id1.data {
-                        "define" => self.define()?,
+                        "define" => self.define(attrs)?,
                         "incsrc" => match self.incsrc(&attrs)? {
                             Some(c) => c,
                             None => continue

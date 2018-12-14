@@ -39,7 +39,7 @@ pub struct LabelRef {
 #[derive(Debug)]
 pub enum CompileData {
     Chunk { label: String, chunk: LabeledChunk },
-    Define { label: String, expr: Expression },
+    Define { label: String, attrs: Vec<Attribute>, expr: Expression },
     Error(CompileError),
 }
 
@@ -110,7 +110,7 @@ pub struct Compiler {
 #[derive(Debug,Default)]
 struct LocalState {
     chunk: LabeledChunk,
-    local_defines: Vec<(String, Expression)>,
+    local_defines: Vec<(String, Vec<Attribute>, Expression)>,
     // label name -> offset
     labels: HashMap<ExprNode, usize>,
     // all the places where it should be replaced
@@ -176,7 +176,7 @@ impl Compiler {
                 _ => linker_exprs.push(r)
             }
         }
-        for (label, mut expr) in local_defines.into_iter() {
+        for (label, attrs, mut expr) in local_defines.into_iter() {
             expr.each_mut(|c| {
                 // This has to be done because local expansion will fuck it.
                 // TODO: make this work in a more civilized way
@@ -190,7 +190,7 @@ impl Compiler {
                 };
             });
             expr.reduce();
-            self.extra.push(CompileData::Define { label, expr });
+            self.extra.push(CompileData::Define { label, attrs, expr });
         }
         chunk.pending_exprs = linker_exprs;
         chunk
@@ -213,8 +213,8 @@ impl Compiler {
                 }
             };
             match c {
-                Statement::Define { label, expr } => {
-                    ls.local_defines.push((label.as_ident().unwrap().to_string(), expr));
+                Statement::Define { label, attrs, expr } => {
+                    ls.local_defines.push((label.as_ident().unwrap().to_string(), attrs, expr));
                 },
                 // Split here
                 Label { name: Span::Ident(mut name), mut attrs } => {
