@@ -194,9 +194,13 @@ impl Span {
     }
     pub fn is_local_label(&self) -> Option<(usize, &Span)> {
         if let Span::Successive(c) = self {
-            if let [ref dots.., ref span @ Span::Ident(_)] = &**c {
-                if dots.iter().all(|c| if let Span::Symbol('.',_) = c { true } else { false }) {
-                    return Some((dots.len() - 1, span))
+            if c.len() > 1 {
+                if let Some(span @ Span::Ident(_)) = c.get(c.len()-1) {
+//              if let [ref dots.., ref span @ Span::Ident(_)] = &**c {
+                    let dots = &c[..c.len()-1];
+                    if dots.iter().all(|c| if let Span::Symbol('.',_) = c { true } else { false }) {
+                        return Some((dots.len() - 1, span))
+                    }
                 }
             }
         }

@@ -114,7 +114,7 @@ impl Argument {
             brackets => IndLong
         ]];
         // Additional check for a malformed mode
-        if expr_spans.len() >= 3 && [x_suf,y_suf,s_suf,parens,brackets].into_iter().any(|i| i(expr_spans).is_some()) {
+        if expr_spans.len() >= 3 && [x_suf,y_suf,s_suf,parens,brackets].iter().any(|i| i(expr_spans).is_some()) {
             return Err(ParseError::UnknownAddressingMode(Span::coagulate(spans)))
         }
         let spans = expr_spans;
@@ -259,6 +259,7 @@ impl<S: Iterator<Item=Span>> Parser<S> {
         /*let file = File::open(&filename).map_err(ParseError::IO)?;
         let file = BufReader::new(file);
         let chars = file.chars().map(Result::unwrap);*/
+        println!("trying to open {}..", filename);
         let lexed = lexer::from_filename(filename.to_string()).unwrap();
         let mut parsed = Box::new(Parser::new(lexed, state, self.global_attrs.clone()));
         let first_stmt = parsed.next();
@@ -270,6 +271,7 @@ impl<S: Iterator<Item=Span>> Parser<S> {
         use std::io::Read;
         let filename = self.skip_wsp()?.as_string().ok_or(ParseError::GenericSyntaxError)?;
         let mut data = Vec::new();
+        println!("trying to open {}..", filename);
         File::open(&filename).map_err(ParseError::IO)?.read_to_end(&mut data).map_err(ParseError::IO)?;
         Ok(Statement::RawData {
             data,

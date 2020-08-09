@@ -1,5 +1,5 @@
 // A small compiler for the 65816 CPU architecture that also supports patches
-#![feature(if_while_or_patterns, type_ascription, slice_patterns, try_trait, nll, specialization, generators)]
+#![feature(type_ascription, try_trait, specialization, generators)]
 
 // while development happens - don't wanna miss the important warns
 #![allow(unused_imports, dead_code, unused_variables, unreachable_code)]
